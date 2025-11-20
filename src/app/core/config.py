@@ -31,9 +31,7 @@ class PostgresSettings(DatabaseSettings):
     POSTGRES_SERVER: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "postgres"
-    POSTGRES_SYNC_PREFIX: str = "postgresql://"
     POSTGRES_ASYNC_PREFIX: str = "postgresql+asyncpg://"
-    POSTGRES_URL: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -41,6 +39,11 @@ class PostgresSettings(DatabaseSettings):
         credentials = f"{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
         location = f"{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         return f"{credentials}@{location}"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def POSTGRES_URL(self) -> str:
+        return f"{self.POSTGRES_ASYNC_PREFIX}{self.POSTGRES_URI}"
 
 
 class FirstUserSettings(BaseSettings):
