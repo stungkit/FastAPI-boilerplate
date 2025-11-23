@@ -1,3 +1,4 @@
+import logging
 import secrets
 from abc import ABC
 from typing import Any
@@ -21,6 +22,7 @@ from ...schemas.user import UserCreate, UserRead
 from .users import write_user
 
 router = APIRouter(tags=["login", "oauth"])
+logger = logging.getLogger(__name__)
 
 
 class BaseOAuthProvider(ABC):
@@ -54,7 +56,14 @@ class BaseOAuthProvider(ABC):
 
     @property
     def is_enabled(self) -> bool:
-        return all(self.provider_config.values())
+        is_enabled = all(self.provider_config.values())
+        if settings.ENABLE_PASSWORD_AUTH and is_enabled:
+            logger.warning(
+                f"Both password authentication and {self.provider_name} OAuth are enabled. "
+                "For enterprise or B2B deployments, it is recommended to disable password authentication "
+                "by setting ENABLE_PASSWORD_AUTH=false and relying solely on OAuth."
+            )
+        return is_enabled
 
     async def _create_and_set_token(self, response: Response, user: dict[str, Any]) -> str:
         access_token = await create_access_token(data={"sub": user["username"]})
