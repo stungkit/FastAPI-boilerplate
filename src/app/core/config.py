@@ -25,39 +25,13 @@ class DatabaseSettings(BaseSettings):
     pass
 
 
-class SQLiteSettings(DatabaseSettings):
-    SQLITE_URI: str = "./sql_app.db"
-    SQLITE_SYNC_PREFIX: str = "sqlite:///"
-    SQLITE_ASYNC_PREFIX: str = "sqlite+aiosqlite:///"
-
-
-class MySQLSettings(DatabaseSettings):
-    MYSQL_USER: str = "username"
-    MYSQL_PASSWORD: str = "password"
-    MYSQL_SERVER: str = "localhost"
-    MYSQL_PORT: int = 5432
-    MYSQL_DB: str = "dbname"
-    MYSQL_SYNC_PREFIX: str = "mysql://"
-    MYSQL_ASYNC_PREFIX: str = "mysql+aiomysql://"
-    MYSQL_URL: str | None = None
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def MYSQL_URI(self) -> str:
-        credentials = f"{self.MYSQL_USER}:{self.MYSQL_PASSWORD}"
-        location = f"{self.MYSQL_SERVER}:{self.MYSQL_PORT}/{self.MYSQL_DB}"
-        return f"{credentials}@{location}"
-
-
 class PostgresSettings(DatabaseSettings):
     POSTGRES_USER: str = "postgres"
     POSTGRES_PASSWORD: str = "postgres"
     POSTGRES_SERVER: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "postgres"
-    POSTGRES_SYNC_PREFIX: str = "postgresql://"
     POSTGRES_ASYNC_PREFIX: str = "postgresql+asyncpg://"
-    POSTGRES_URL: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -65,6 +39,11 @@ class PostgresSettings(DatabaseSettings):
         credentials = f"{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
         location = f"{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         return f"{credentials}@{location}"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def POSTGRES_URL(self) -> str:
+        return f"{self.POSTGRES_ASYNC_PREFIX}{self.POSTGRES_URI}"
 
 
 class FirstUserSettings(BaseSettings):
@@ -151,7 +130,6 @@ class CORSSettings(BaseSettings):
 
 class Settings(
     AppSettings,
-    SQLiteSettings,
     PostgresSettings,
     CryptSettings,
     FirstUserSettings,
