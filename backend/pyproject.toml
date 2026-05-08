@@ -48,12 +48,12 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["backend/src"]
+where = ["src"]
 include = ["*"]
 
 [tool.pytest.ini_options]
-pythonpath = ["backend/src"]
-testpaths = ["backend/tests"]
+pythonpath = ["src"]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 python_classes = ["Test*"]
@@ -81,7 +81,6 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
-mypy_path = "backend"
 namespace_packages = true
 explicit_package_bases = true
 

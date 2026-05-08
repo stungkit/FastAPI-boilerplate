@@ -40,7 +40,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     rm requirements-prod.txt
 
 # Copy source code
-COPY backend/src ./src
+COPY src ./src
 
 # Set Python path
 ENV PYTHONPATH=/app/src
@@ -57,7 +57,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     rm requirements-dev.txt
 
 # Copy test files for development
-COPY backend/tests ./tests
+COPY tests ./tests
 
 # Create non-root user for security (same as production)
 RUN groupadd -r appuser && useradd -r -m -g appuser appuser
@@ -77,8 +77,8 @@ FROM base AS migrate
 ARG DATABASE_URL=""
 
 # Copy migration files
-COPY backend/migrations ./migrations
-COPY backend/alembic.ini .
+COPY migrations ./migrations
+COPY alembic.ini .
 
 # Create non-root user for security
 RUN groupadd -r appuser && useradd -r -m -g appuser appuser
