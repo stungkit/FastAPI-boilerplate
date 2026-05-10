@@ -108,6 +108,22 @@ ignore_missing_imports = true
 module = "sqlalchemy.ext.asyncio"
 ignore_errors = true
 
+[[tool.mypy.overrides]]
+module = "taskiq"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "taskiq.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "taskiq_redis"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "taskiq_aio_pika"
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 128
 
