@@ -30,4 +30,3 @@ jobs:
         env:
           ENVIRONMENT: local
           SECRET_KEY: test-secret-key-for-testing-only
-          MYPYPATH: src
