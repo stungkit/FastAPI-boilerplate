@@ -1,6 +1,7 @@
 """Taskiq broker configuration and initialization."""
 
 from taskiq import AsyncBroker
+from taskiq_aio_pika import AioPikaBroker
 from taskiq_redis import ListQueueBroker, RedisAsyncResultBackend
 
 from ..config import TaskiqBrokerType, get_settings
@@ -41,13 +42,6 @@ def _create_redis_broker() -> AsyncBroker:
 
 def _create_rabbitmq_broker() -> AsyncBroker:
     """Create RabbitMQ-based broker for taskiq."""
-    try:
-        from taskiq_aio_pika import AioPikaBroker
-    except ImportError as e:
-        raise ImportError(
-            "taskiq-aio-pika is required for RabbitMQ support. Install it with: pip install taskiq-aio-pika"
-        ) from e
-
     rabbitmq_url = settings.TASKIQ_BROKER_URL
 
     broker = AioPikaBroker(url=rabbitmq_url, queue_name="default")

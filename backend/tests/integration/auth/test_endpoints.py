@@ -8,18 +8,23 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.infrastructure.auth.oauth.dependencies import (
+    get_google_provider,
+    get_oauth_state,
+    get_oauth_state_storage,
+)
 from src.infrastructure.auth.oauth.provider import AbstractOAuthProvider
 from src.infrastructure.auth.oauth.schemas import OAuthState
+from src.infrastructure.auth.session.dependencies import get_current_session_data, get_session_manager
 from src.infrastructure.auth.session.manager import SessionManager
 from src.infrastructure.auth.session.storage import AbstractSessionStorage
+from src.infrastructure.database.session import async_session
 from src.interfaces.main import app
 
 
 @pytest.mark.asyncio
 async def test_oauth_google_login(client: AsyncClient):
     """Test the OAuth Google login initiation endpoint."""
-    from src.infrastructure.auth.oauth.dependencies import get_google_provider, get_oauth_state_storage
-
     mock_provider = AsyncMock(spec=AbstractOAuthProvider)
     mock_provider.name = "google"
     mock_provider.get_authorization_url = AsyncMock(
@@ -58,11 +63,6 @@ async def test_oauth_google_login(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_oauth_callback_invalid_state(client: AsyncClient):
     """Test the OAuth callback endpoint with an invalid state parameter."""
-    from src.infrastructure.auth.oauth.dependencies import get_google_provider, get_oauth_state, get_oauth_state_storage
-    from src.infrastructure.auth.oauth.provider import AbstractOAuthProvider
-    from src.infrastructure.auth.session.dependencies import get_session_manager
-    from src.infrastructure.auth.session.storage import AbstractSessionStorage
-
     original_deps = app.dependency_overrides.copy()
 
     try:
@@ -106,11 +106,6 @@ async def test_oauth_callback_invalid_state(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_oauth_callback_provider_mismatch(client: AsyncClient):
     """Test the OAuth callback endpoint with a state parameter for a different provider."""
-    from src.infrastructure.auth.oauth.dependencies import get_google_provider, get_oauth_state, get_oauth_state_storage
-    from src.infrastructure.auth.oauth.provider import AbstractOAuthProvider
-    from src.infrastructure.auth.session.dependencies import get_session_manager
-    from src.infrastructure.auth.session.storage import AbstractSessionStorage
-
     original_deps = app.dependency_overrides.copy()
 
     try:
@@ -160,9 +155,6 @@ async def test_oauth_callback_provider_mismatch(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_check_auth_authenticated(client: AsyncClient, db_session: AsyncSession):
     """Test the check-auth endpoint when the user is authenticated."""
-    from src.infrastructure.auth.session.dependencies import get_current_session_data
-    from src.infrastructure.database.session import async_session
-
     mock_session = MagicMock()
     mock_session.user_id = 1
     mock_session.created_at = datetime(2023, 1, 1, 0, 0, 0, tzinfo=UTC)
@@ -197,8 +189,6 @@ async def test_check_auth_authenticated(client: AsyncClient, db_session: AsyncSe
 @pytest.mark.asyncio
 async def test_check_auth_not_authenticated(client: AsyncClient):
     """Test the check-auth endpoint when the user is not authenticated."""
-    from src.infrastructure.auth.session.dependencies import get_current_session_data
-
     original_deps = app.dependency_overrides.copy()
 
     try:

@@ -7,14 +7,15 @@ slow down every CLI invocation. Plugin features come from the
 
 from __future__ import annotations
 
+import warnings
+
 from .. import plugins as _plugins
+from ._builtins.deploy.feature import DeployFeature
 from .base import Feature
 
 
 def _builtin_features() -> dict[str, Feature]:
-    """Return in-tree features. Imports happen here to keep startup lazy."""
-    from ._builtins.deploy.feature import DeployFeature  # noqa: PLC0415
-
+    """Return in-tree features."""
     return {
         "deploy": DeployFeature(),
     }
@@ -26,8 +27,6 @@ def all_features() -> dict[str, Feature]:
     In-tree features take precedence on name collisions; a warning is
     surfaced when a plugin tries to shadow a built-in.
     """
-    import warnings  # noqa: PLC0415
-
     found: dict[str, Feature] = dict(_builtin_features())
     for name, feature in _plugins.discover_feature_plugins().items():
         if name in found:

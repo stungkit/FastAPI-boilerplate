@@ -7,9 +7,11 @@ from starlette.requests import Request
 from wtforms import SelectField
 
 from ....infrastructure.auth.utils import get_password_hash
+from ....infrastructure.database.session import local_session
 from ....modules.user.enums import OAuthProvider
 from ....modules.user.models import User
 from ....modules.user.schemas import UserUpdate
+from ....modules.user.service import UserService
 from ..mixins import DataclassModelMixin
 
 OAUTH_PROVIDER_CHOICES = [("", "None")] + [(p.value, p.value.title()) for p in OAuthProvider]
@@ -63,9 +65,6 @@ class UserAdmin(DataclassModelMixin, ModelView, model=User):
             request: The incoming request object.
             pk: Primary key (ID) of the user to anonymize.
         """
-        from ....infrastructure.database.session import local_session
-        from ....modules.user.service import UserService
-
         async with local_session() as db:
             user_service = UserService()
             await user_service.anonymize_user(user_id=int(pk), db=db)

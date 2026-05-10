@@ -1,7 +1,11 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import Request, Response
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.infrastructure.auth.routes import login
 from src.infrastructure.auth.session.manager import SessionManager
 
 
@@ -77,12 +81,6 @@ async def test_track_login_attempt_without_rate_limiter():
 @pytest.mark.asyncio
 async def test_login_endpoint_rate_limiting():
     """Test that the login endpoint applies rate limiting."""
-    from fastapi import Request, Response
-    from fastapi.security import OAuth2PasswordRequestForm
-    from sqlalchemy.ext.asyncio import AsyncSession
-
-    from src.infrastructure.auth.routes import login
-
     mock_request = MagicMock(spec=Request)
     mock_request.client.host = "192.168.1.1"
 

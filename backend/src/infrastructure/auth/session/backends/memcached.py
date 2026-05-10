@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from ....config.settings import get_settings
 from ....logging import get_logger
-from ..storage import AbstractSessionStorage
+from ..base import AbstractSessionStorage
 
 T = TypeVar("T", bound=BaseModel)
 settings = get_settings()

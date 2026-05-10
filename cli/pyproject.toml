@@ -37,7 +37,7 @@ line-length = 128
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
-extend-select = ["UP006", "UP007", "UP035", "UP039"]
+extend-select = ["UP006", "UP007", "UP035", "UP039", "PLC0415"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["cli"]

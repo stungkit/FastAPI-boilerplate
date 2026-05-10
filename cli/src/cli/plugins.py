@@ -20,13 +20,10 @@ from __future__ import annotations
 import sys
 import warnings
 from importlib.metadata import EntryPoint, entry_points
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import typer
+import typer
 
-    from .features.base import Feature
-
+from .features.base import Feature
 
 COMMANDS_GROUP = "bp.commands"
 FEATURES_GROUP = "bp.features"
@@ -47,8 +44,6 @@ def _safe_load(ep: EntryPoint) -> object | None:
 
 def discover_command_plugins() -> dict[str, typer.Typer]:
     """Return ``{name: typer_app}`` for every healthy ``bp.commands`` entry point."""
-    import typer  # noqa: PLC0415
-
     found: dict[str, typer.Typer] = {}
     for ep in entry_points(group=COMMANDS_GROUP):
         loaded = _safe_load(ep)
@@ -72,8 +67,6 @@ def discover_feature_plugins() -> dict[str, Feature]:
     that returns one (helpful when constructing features needs the project
     context).
     """
-    from .features.base import Feature  # noqa: PLC0415
-
     found: dict[str, Feature] = {}
     for ep in entry_points(group=FEATURES_GROUP):
         loaded = _safe_load(ep)

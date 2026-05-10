@@ -17,6 +17,16 @@ import secrets
 
 import typer
 
+# The installed package layout puts `infrastructure`, `modules`, etc.
+# at the top of the import tree (see [tool.setuptools.packages.find]
+# in backend/pyproject.toml). The CLI is only callable when the package
+# is installed, so this form is always valid here.
+from infrastructure.config.settings import get_settings
+from infrastructure.security.production_validator import (
+    ProductionSecurityError,
+    ProductionSecurityValidator,
+)
+
 from ..lib.prompts import error, info, success, warn
 
 app = typer.Typer(no_args_is_help=True, help="Inspect and prepare the runtime environment.")
@@ -37,16 +47,6 @@ def validate() -> None:
     Forces production-mode validation regardless of ``ENVIRONMENT`` so
     you can audit a dev or staging config the same way prod is gated.
     """
-    # The installed package layout puts `infrastructure`, `modules`, etc.
-    # at the top of the import tree (see [tool.setuptools.packages.find]
-    # in pyproject.toml). The CLI is only callable when the package is
-    # installed, so this form is always valid here.
-    from infrastructure.config.settings import get_settings  # noqa: PLC0415
-    from infrastructure.security.production_validator import (  # noqa: PLC0415
-        ProductionSecurityError,
-        ProductionSecurityValidator,
-    )
-
     settings = get_settings()
 
     class _ForcedProd(ProductionSecurityValidator):

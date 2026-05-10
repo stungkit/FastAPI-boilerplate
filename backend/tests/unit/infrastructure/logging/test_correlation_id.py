@@ -3,6 +3,7 @@
 import contextvars
 import logging
 import threading
+import time
 from io import StringIO
 from unittest.mock import MagicMock, patch
 
@@ -327,8 +328,6 @@ def test_correlation_id_filter_performance():
     set_correlation_id("performance-test-id")
 
     # Time multiple filter calls
-    import time
-
     start_time = time.time()
 
     for _ in range(1000):

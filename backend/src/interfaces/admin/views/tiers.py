@@ -4,6 +4,7 @@ from sqladmin import ModelView
 from starlette.requests import Request
 
 from ....infrastructure.database.session import local_session
+from ....modules.tier.crud import crud_tiers
 from ....modules.tier.models import Tier
 from ....modules.tier.schemas import TierCreate, TierUpdate
 from ....modules.tier.service import TierService
@@ -45,8 +46,6 @@ class TierAdmin(DataclassModelMixin, ModelView, model=Tier):
         Raises:
             ValueError: If tier not found or has dependencies.
         """
-        from ....modules.tier.crud import crud_tiers
-
         async with local_session() as db:
             tier_service = TierService()
 

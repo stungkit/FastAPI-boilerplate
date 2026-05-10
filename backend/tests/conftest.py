@@ -2,9 +2,13 @@ import os
 import secrets
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
+import redis as syncredis
+import redis.asyncio as aioredis
+from faker import Faker
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -17,7 +21,7 @@ from src.infrastructure.auth.session.backends.memory import MemorySessionStorage
 from src.infrastructure.auth.session.dependencies import get_current_superuser, get_current_user
 from src.infrastructure.auth.session.schemas import CSRFToken
 from src.infrastructure.auth.utils import get_password_hash
-from src.infrastructure.config.settings import get_settings
+from src.infrastructure.config.settings import Settings, get_settings
 from src.infrastructure.database.session import Base, async_session
 from src.interfaces.main import app
 from src.modules.tier.models import Tier
@@ -138,8 +142,6 @@ async def second_test_tier(db_session: AsyncSession):
 @pytest_asyncio.fixture
 async def test_user(db_session: AsyncSession, test_tier: dict):
     """Create a test user."""
-    from faker import Faker
-
     fake = Faker()
     user = User(
         name=fake.name(),
@@ -167,8 +169,6 @@ async def test_user(db_session: AsyncSession, test_tier: dict):
 @pytest_asyncio.fixture
 async def test_user_2(db_session: AsyncSession, test_tier: dict):
     """Second test user for permission tests."""
-    from faker import Faker
-
     fake = Faker()
     user = User(
         name=fake.name(),
@@ -195,8 +195,6 @@ async def test_user_2(db_session: AsyncSession, test_tier: dict):
 @pytest_asyncio.fixture
 async def test_superuser(db_session: AsyncSession, test_tier: dict):
     """Create a test superuser."""
-    from faker import Faker
-
     fake = Faker()
     user = User(
         name=fake.name(),
@@ -320,23 +318,13 @@ def patch_redis_pipeline_for_tests(monkeypatch):
             self.commands.append(("delete", args, kwargs))
             return self
 
-    try:
-        import redis as syncredis
-        import redis.asyncio as aioredis
-
-        monkeypatch.setattr(aioredis.Redis, "pipeline", MockPipeline)
-        monkeypatch.setattr(syncredis.Redis, "pipeline", MockPipeline)
-    except ImportError:
-        pass
+    monkeypatch.setattr(aioredis.Redis, "pipeline", MockPipeline)
+    monkeypatch.setattr(syncredis.Redis, "pipeline", MockPipeline)
 
 
 @pytest.fixture
 def mock_rate_limit_settings_fail_open():
     """Mock settings with fail_open=True for rate limiter tests."""
-    from unittest.mock import MagicMock
-
-    from src.infrastructure.config.settings import Settings
-
     settings = MagicMock(spec=Settings)
     settings.RATE_LIMITER_ENABLED = True
     settings.RATE_LIMITER_FAIL_OPEN = True
@@ -348,10 +336,6 @@ def mock_rate_limit_settings_fail_open():
 @pytest.fixture
 def mock_rate_limit_settings_fail_closed():
     """Mock settings with fail_open=False for rate limiter tests."""
-    from unittest.mock import MagicMock
-
-    from src.infrastructure.config.settings import Settings
-
     settings = MagicMock(spec=Settings)
     settings.RATE_LIMITER_ENABLED = True
     settings.RATE_LIMITER_FAIL_OPEN = False

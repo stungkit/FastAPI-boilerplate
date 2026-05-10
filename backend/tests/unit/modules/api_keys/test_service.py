@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.modules.api_keys.crud import crud_key_permissions
@@ -10,6 +11,7 @@ from src.modules.api_keys.enums import KeyPermissionAction, KeyPermissionResourc
 from src.modules.api_keys.schemas import (
     APIKeyCreate,
     APIKeyUpdate,
+    KeyPermissionCreate,
     KeyUsageCreate,
 )
 from src.modules.api_keys.service import APIKeyService
@@ -22,7 +24,7 @@ def api_key_service():
     return APIKeyService()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_api_key(api_key_service, db_session: AsyncSession, test_user: dict):
     """Create a test API key."""
     key_data = APIKeyCreate(
@@ -150,8 +152,6 @@ async def test_delete_api_key(api_key_service, db_session: AsyncSession, test_us
 async def test_validate_api_key_success(api_key_service, db_session: AsyncSession, test_user: dict, test_api_key):
     """Test successful API key validation."""
     # Add permission for the key
-    from src.modules.api_keys.schemas import KeyPermissionCreate
-
     permission_data = KeyPermissionCreate(
         api_key_id=test_api_key["id"],
         resource=KeyPermissionResource.CONVERSATIONS,
@@ -230,8 +230,6 @@ async def test_validate_api_key_no_permission(api_key_service, db_session: Async
 async def test_wildcard_permissions(api_key_service, db_session: AsyncSession, test_user: dict, test_api_key):
     """Test wildcard permission validation."""
     # Add wildcard permission
-    from src.modules.api_keys.schemas import KeyPermissionCreate
-
     permission_data = KeyPermissionCreate(
         api_key_id=test_api_key["id"],
         resource=KeyPermissionResource.WILDCARD,

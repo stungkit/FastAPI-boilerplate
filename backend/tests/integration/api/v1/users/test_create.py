@@ -6,6 +6,8 @@ from faker import Faker
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.modules.user.models import User
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -88,8 +90,6 @@ async def test_create_superuser(superuser_auth_client: AsyncClient, db_session: 
 
     assert response.status_code == 201
     created_user = response.json()
-
-    from src.modules.user.models import User
 
     user_in_db = await db_session.get(User, created_user["id"])
     assert user_in_db is not None, "User not found in database"

@@ -7,7 +7,7 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from ....logging import get_logger
-from ..storage import AbstractSessionStorage
+from ..base import AbstractSessionStorage
 
 T = TypeVar("T", bound=BaseModel)
 logger = get_logger()

@@ -12,8 +12,11 @@ Configuration Logic:
 """
 
 import contextvars
+import inspect
 import logging
 import logging.config
+import threading
+import uuid
 
 from ..config import LogFormat
 from ..config.settings import EnvironmentOption, get_settings
@@ -221,8 +224,6 @@ def add_correlation_id_filter() -> None:
     all log records automatically. Adds the filter to the root logger
     so all child loggers inherit the correlation ID functionality.
     """
-    import logging
-
     root_logger = logging.getLogger()
     correlation_filter = CorrelationIdFilter()
     root_logger.addFilter(correlation_filter)
@@ -268,8 +269,6 @@ class CorrelationIdFilter(logging.Filter):
         Returns:
             Correlation ID string or None if not found
         """
-        import threading
-
         try:
             correlation_id = correlation_id_var.get()
             if correlation_id:
@@ -285,8 +284,6 @@ class CorrelationIdFilter(logging.Filter):
             pass
 
         try:
-            import inspect
-
             frame = inspect.currentframe()
             while frame:
                 if "request" in frame.f_locals:
@@ -334,8 +331,6 @@ def generate_correlation_id() -> str:
     Returns:
         New UUID-based correlation ID
     """
-    import uuid
-
     return str(uuid.uuid4())
 
 
