@@ -63,7 +63,7 @@ class MemcachedSessionStorage(AbstractSessionStorage[T]):
             The encoded key as bytes
         """
         if len(key) > 240:
-            key_hash = hashlib.md5(key.encode()).hexdigest()
+            key_hash = hashlib.sha256(key.encode()).hexdigest()[:32]
             key = f"{key[:200]}:{key_hash}"
         return key.encode("utf-8")
 

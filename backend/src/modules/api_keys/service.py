@@ -1,6 +1,7 @@
 """API key management service for developer-facing products."""
 
 import hashlib
+import hmac
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 from fastcrud.types import GetMultiResponseDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...infrastructure.config.settings import get_settings
 from ...infrastructure.logging import get_logger
 from ..common.exceptions import PermissionDeniedError, ResourceNotFoundError
 from .crud import crud_api_keys, crud_key_permissions, crud_key_usage
@@ -31,6 +33,7 @@ from .utils import (
 )
 
 logger = get_logger()
+settings = get_settings()
 
 
 class APIKeyService:
@@ -54,13 +57,22 @@ class APIKeyService:
         raw_key = secrets.token_urlsafe(self.key_length)
         prefix = raw_key[: self.key_prefix_length]
         api_key = f"fai_{prefix}_{raw_key[self.key_prefix_length :]}"
-        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+        key_hash = self._hash_api_key(api_key)
 
         return api_key, prefix, key_hash
 
     def _hash_api_key(self, api_key: str) -> str:
-        """Hash an API key for storage or comparison."""
-        return hashlib.sha256(api_key.encode()).hexdigest()
+        """Hash an API key for storage or comparison.
+
+        HMAC-SHA256 with SECRET_KEY as the pepper. Deterministic so DB lookup
+        by `key_hash` stays O(1); the server-side secret means a stolen
+        `key_hash` column alone cannot be used to forge or verify keys offline.
+        """
+        return hmac.new(
+            settings.SECRET_KEY.encode("utf-8"),
+            api_key.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
 
     async def create_api_key(
         self,
