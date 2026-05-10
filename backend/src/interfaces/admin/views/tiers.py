@@ -10,7 +10,7 @@ from ....modules.tier.service import TierService
 from ..mixins import DataclassModelMixin
 
 
-class TierAdmin(DataclassModelMixin, ModelView, model=Tier):
+class TierAdmin(DataclassModelMixin, ModelView, model=Tier):  # type: ignore[call-arg]
     """Admin view for Tier model."""
 
     name = "Tier"

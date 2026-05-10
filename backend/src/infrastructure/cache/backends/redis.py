@@ -143,7 +143,7 @@ class RedisBackend(CacheBackend):
             True if the cache is available, False otherwise.
         """
         try:
-            result = await self.client.ping()  # type: ignore[misc]
+            result = await self.client.ping()
             return bool(result)
         except Exception:
             return False
