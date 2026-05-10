@@ -7,7 +7,7 @@ The codebase follows a three-layer architecture (**interfaces / infrastructure /
 ```text
 fastapi-boilerplate/
 ├── backend/                  # Python project root (see below)
-├── docs/                     # mkdocs documentation
+├── docs/                     # zensical documentation
 ├── .github/                  # CI workflows
 ├── README.md
 └── LICENSE.md
