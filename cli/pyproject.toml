@@ -44,12 +44,9 @@ known-first-party = ["cli"]
 
 [tool.mypy]
 python_version = "3.11"
-mypy_path = "src"
 warn_return_any = true
 warn_unused_configs = true
 warn_unused_ignores = true
-namespace_packages = true
-explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 module = "infrastructure.*"
