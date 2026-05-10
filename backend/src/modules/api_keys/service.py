@@ -1,5 +1,7 @@
 """API key management service for developer-facing products."""
 
+import base64
+import binascii
 import hashlib
 import hmac
 import secrets
@@ -7,13 +9,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastcrud.types import GetMultiResponseDict
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...infrastructure.config.settings import get_settings
 from ...infrastructure.logging import get_logger
 from ..common.exceptions import PermissionDeniedError, ResourceNotFoundError
 from .crud import crud_api_keys, crud_key_permissions, crud_key_usage
 from .enums import KeyPermissionAction, KeyPermissionResource
+from .models import APIKey
 from .schemas import (
     APIKeyCreate,
     APIKeyCreateInternal,
@@ -33,7 +36,11 @@ from .utils import (
 )
 
 logger = get_logger()
-settings = get_settings()
+
+_SCRYPT_N = 2**14
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+_SCRYPT_DKLEN = 32
 
 
 class APIKeyService:
@@ -62,17 +69,49 @@ class APIKeyService:
         return api_key, prefix, key_hash
 
     def _hash_api_key(self, api_key: str) -> str:
-        """Hash an API key for storage or comparison.
+        """Hash an API key for storage using scrypt with a per-row salt.
 
-        HMAC-SHA256 with SECRET_KEY as the pepper. Deterministic so DB lookup
-        by `key_hash` stays O(1); the server-side secret means a stolen
-        `key_hash` column alone cannot be used to forge or verify keys offline.
+        Stored format: ``scrypt$N$r$p$salt_b64$derived_b64``. Non-deterministic;
+        DB lookup uses ``key_prefix`` (already indexed) instead of ``key_hash``.
         """
-        return hmac.new(
-            settings.SECRET_KEY.encode("utf-8"),
+        salt = secrets.token_bytes(16)
+        derived = hashlib.scrypt(
             api_key.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+            salt=salt,
+            n=_SCRYPT_N,
+            r=_SCRYPT_R,
+            p=_SCRYPT_P,
+            dklen=_SCRYPT_DKLEN,
+        )
+        salt_b64 = base64.b64encode(salt).decode("ascii")
+        derived_b64 = base64.b64encode(derived).decode("ascii")
+        return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt_b64}${derived_b64}"
+
+    def _verify_api_key(self, api_key: str, stored_hash: str) -> bool:
+        """Verify a candidate ``api_key`` against a stored scrypt hash."""
+        try:
+            scheme, n_str, r_str, p_str, salt_b64, derived_b64 = stored_hash.split("$", 5)
+        except ValueError:
+            return False
+        if scheme != "scrypt":
+            return False
+        try:
+            n = int(n_str)
+            r = int(r_str)
+            p = int(p_str)
+            salt = base64.b64decode(salt_b64)
+            expected = base64.b64decode(derived_b64)
+        except (ValueError, binascii.Error):
+            return False
+        actual = hashlib.scrypt(
+            api_key.encode("utf-8"),
+            salt=salt,
+            n=n,
+            r=r,
+            p=p,
+            dklen=len(expected),
+        )
+        return hmac.compare_digest(actual, expected)
 
     async def create_api_key(
         self,
@@ -263,14 +302,30 @@ class APIKeyService:
         Returns:
             Validation response with key details and permissions
         """
-        key_hash = self._hash_api_key(api_key)
-        key = await crud_api_keys.get(db=db, key_hash=key_hash, schema_to_select=APIKeyRead)
-
-        if not key:
+        parts = api_key.split("_", 2)
+        if len(parts) != 3 or parts[0] != "fai":
             return APIKeyValidationResponse(
                 is_valid=False,
                 error_message="Invalid API key",
             )
+        prefix = parts[1]
+
+        result = await db.execute(select(APIKey).where(APIKey.key_prefix == prefix).execution_options(populate_existing=True))
+        candidates = result.scalars().all()
+
+        matched: APIKey | None = None
+        for candidate in candidates:
+            if self._verify_api_key(api_key, candidate.key_hash):
+                matched = candidate
+                break
+
+        if matched is None:
+            return APIKeyValidationResponse(
+                is_valid=False,
+                error_message="Invalid API key",
+            )
+
+        key = APIKeyRead.model_validate(matched).model_dump()
 
         if not key["is_active"]:
             return APIKeyValidationResponse(

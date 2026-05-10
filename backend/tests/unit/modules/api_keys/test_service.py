@@ -370,15 +370,19 @@ async def test_get_user_summary(api_key_service, db_session: AsyncSession, test_
 
 
 @pytest.mark.asyncio
-async def test_api_key_hash_consistency(api_key_service):
-    """Test that API key hashing is consistent."""
+async def test_api_key_hash_roundtrip(api_key_service):
+    """Hashing produces a fresh salt each call; verifying must still succeed."""
     test_key = "fai_test_key_12345"
 
     hash1 = api_key_service._hash_api_key(test_key)
     hash2 = api_key_service._hash_api_key(test_key)
 
-    assert hash1 == hash2
-    assert len(hash1) == 64  # SHA256 hex digest length
+    assert hash1 != hash2
+    assert hash1.startswith("scrypt$")
+    assert hash2.startswith("scrypt$")
+    assert api_key_service._verify_api_key(test_key, hash1)
+    assert api_key_service._verify_api_key(test_key, hash2)
+    assert not api_key_service._verify_api_key("fai_wrong_key", hash1)
 
 
 @pytest.mark.asyncio

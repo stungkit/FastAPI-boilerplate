@@ -19,7 +19,7 @@ from testcontainers.postgres import PostgresContainer
 
 from src.infrastructure.auth.session.backends.memory import MemorySessionStorage
 from src.infrastructure.auth.session.dependencies import get_current_superuser, get_current_user
-from src.infrastructure.auth.session.schemas import CSRFToken
+from src.infrastructure.auth.session.schemas import CSRFToken, SessionData
 from src.infrastructure.auth.utils import get_password_hash
 from src.infrastructure.config.settings import Settings, get_settings
 from src.infrastructure.database.session import Base, async_session
@@ -258,8 +258,8 @@ async def superuser_auth_client(client: AsyncClient, test_superuser: dict):
 @pytest.fixture(autouse=True)
 def mock_session_backend(monkeypatch):
     """Use in-memory session backend instead of Redis during tests."""
-    memory_storage = MemorySessionStorage(prefix="session:", expiration=1800)
-    memory_csrf_storage = MemorySessionStorage(prefix="csrf:", expiration=1800)
+    memory_storage: MemorySessionStorage[SessionData] = MemorySessionStorage(prefix="session:", expiration=1800)
+    memory_csrf_storage: MemorySessionStorage[CSRFToken] = MemorySessionStorage(prefix="csrf:", expiration=1800)
 
     def override_session_dependency(backend, model_type, **kwargs):
         if model_type == CSRFToken:
