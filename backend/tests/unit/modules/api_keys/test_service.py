@@ -6,10 +6,11 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.modules.api_keys.crud import crud_key_permissions
+from src.modules.api_keys.crud import crud_api_keys, crud_key_permissions
 from src.modules.api_keys.enums import KeyPermissionAction, KeyPermissionResource
 from src.modules.api_keys.schemas import (
     APIKeyCreate,
+    APIKeyCreateInternal,
     APIKeyUpdate,
     KeyPermissionCreate,
     KeyUsageCreate,
@@ -383,6 +384,42 @@ async def test_api_key_hash_roundtrip(api_key_service):
     assert api_key_service._verify_api_key(test_key, hash1)
     assert api_key_service._verify_api_key(test_key, hash2)
     assert not api_key_service._verify_api_key("fai_wrong_key", hash1)
+
+
+@pytest.mark.asyncio
+async def test_validate_api_key_with_underscore_in_prefix(api_key_service, db_session: AsyncSession, test_user: dict):
+    """Regression: secrets.token_urlsafe alphabet includes `_`; prefix extraction must not split on it.
+
+    When the random 8-char prefix happens to contain `_`, a naive `split("_", 2)` returns the wrong
+    substring and the key_prefix lookup misses, breaking validation for the (rare) keys that draw
+    underscores.
+    """
+    api_key, prefix, key_hash = api_key_service._generate_api_key()
+    forced_prefix = "ab_cd_ef"
+    api_key = f"fai_{forced_prefix}_{api_key.split('_', 2)[2]}"
+    forced_hash = api_key_service._hash_api_key(api_key)
+
+    key_dict = {
+        "name": "underscore prefix",
+        "user_id": test_user["id"],
+        "key_hash": forced_hash,
+        "key_prefix": forced_prefix,
+        "permissions": {},
+        "usage_limits": {},
+    }
+    await crud_api_keys.create(db=db_session, object=APIKeyCreateInternal(**key_dict))
+
+    permission_data = KeyPermissionCreate(
+        api_key_id=(await crud_api_keys.get(db=db_session, key_prefix=forced_prefix))["id"],
+        resource=KeyPermissionResource.WILDCARD,
+        action=KeyPermissionAction.WILDCARD,
+        is_allowed=True,
+    )
+    await crud_key_permissions.create(db=db_session, object=permission_data)
+
+    validation = await api_key_service.validate_api_key(api_key=api_key, resource="anything", action="anything", db=db_session)
+
+    assert validation.is_valid is True
 
 
 @pytest.mark.asyncio

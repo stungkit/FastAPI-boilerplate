@@ -302,13 +302,14 @@ class APIKeyService:
         Returns:
             Validation response with key details and permissions
         """
-        parts = api_key.split("_", 2)
-        if len(parts) != 3 or parts[0] != "fai":
+        prefix_start = len("fai_")
+        prefix_end = prefix_start + self.key_prefix_length
+        if not api_key.startswith("fai_") or len(api_key) <= prefix_end or api_key[prefix_end] != "_":
             return APIKeyValidationResponse(
                 is_valid=False,
                 error_message="Invalid API key",
             )
-        prefix = parts[1]
+        prefix = api_key[prefix_start:prefix_end]
 
         result = await db.execute(select(APIKey).where(APIKey.key_prefix == prefix).execution_options(populate_existing=True))
         candidates = result.scalars().all()
