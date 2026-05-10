@@ -1,650 +1,400 @@
 # Database Schemas
 
-This section explains how Pydantic schemas handle data validation, serialization, and API contracts in the boilerplate. Schemas are separate from SQLAlchemy models and define what data enters and exits your API.
+Pydantic schemas handle three things in this codebase: **input validation**, **output serialization**, and **API contracts** that frontend and backend can rely on. Schemas are separate from the SQLAlchemy models — keeping the two layers split lets you control exactly what each endpoint accepts and returns.
 
-## Schema Purpose and Structure
+## Where Schemas Live
 
-Schemas serve three main purposes:
-
-1. **Input Validation** - Validate incoming API request data
-2. **Output Serialization** - Format database data for API responses  
-3. **API Contracts** - Define clear interfaces between frontend and backend
-
-### Schema File Organization
-
-Schemas are organized in `src/app/schemas/` with one file per model:
+Each module owns its schemas, colocated with the model and CRUD:
 
 ```text
-src/app/schemas/
-├── __init__.py       # Imports for easy access
-├── user.py          # User-related schemas
-├── post.py          # Post-related schemas
-├── tier.py          # Tier schemas
-├── rate_limit.py    # Rate limit schemas
-└── job.py           # Background job schemas
+backend/src/modules/
+├── user/schemas.py            # UserCreate, UserRead, UserUpdate, UserAnonymize, ...
+├── tier/schemas.py            # TierCreate, TierRead, TierUpdate
+├── rate_limit/schemas.py      # RateLimitCreate, RateLimitRead, RateLimitUpdate
+└── api_keys/schemas.py        # APIKeyCreate, APIKeyRead, APIKeyUpdate, KeyUsageRead
 ```
 
-## User Schema Implementation
+Cross-module shared schemas (timestamp/soft-delete mixins, common error shapes) live in `backend/src/modules/common/schemas.py`.
 
-The User schemas (`src/app/schemas/user.py`) demonstrate common validation patterns:
+## Common Mixin Schemas
+
+`modules/common/schemas.py` provides two reusable Pydantic mixins matching the SQLAlchemy mixins:
+
+```python
+# modules/common/schemas.py
+class TimestampSchema(BaseModel):
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC).replace(tzinfo=None))
+    updated_at: datetime | None = Field(default=None)
+    # serializers cast both to ISO strings
+
+
+class PersistentDeletion(BaseModel):
+    deleted_at: datetime | None = Field(default=None)
+    is_deleted: bool = False
+```
+
+Compose them onto your full-record schema where applicable.
+
+## The User Schemas
+
+`modules/user/schemas.py` is the most extensive example. The pattern is **one schema per role** — each operation gets its own shape:
 
 ```python
 from datetime import datetime
 from typing import Annotated
-
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from ..core.schemas import PersistentDeletion, TimestampSchema, UUIDSchema
+from ..common.schemas import PersistentDeletion, TimestampSchema
 
 
-# Base schema with common fields
+# Common fields shared by create/update/full-record
 class UserBase(BaseModel):
-    name: Annotated[
-        str, 
-        Field(
-            min_length=2,
-            max_length=30,
-            examples=["User Userson"]
-        )
-    ]
+    name: Annotated[str, Field(min_length=2, max_length=30, examples=["User Userson"])]
     username: Annotated[
         str,
-        Field(
-            min_length=2,
-            max_length=20,
-            pattern=r"^[a-z0-9]+$",
-            examples=["userson"]
-        )
+        Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", examples=["userson"]),
     ]
     email: Annotated[EmailStr, Field(examples=["user.userson@example.com"])]
 
 
-# Full User data
-class User(TimestampSchema, UserBase, UUIDSchema, PersistentDeletion):
-    profile_image_url: Annotated[
-        str,
-        Field(default="https://www.profileimageurl.com")
-    ]
+# Full record (used internally — never returned to clients)
+class User(TimestampSchema, UserBase, PersistentDeletion):
     hashed_password: str
     is_superuser: bool = False
+    profile_image_url: str = "https://www.profileimageurl.com"
     tier_id: int | None = None
 
+    # OAuth
+    google_id: str | None = None
+    github_id: str | None = None
+    oauth_provider: str | None = None
+    email_verified: bool = False
 
-# Schema for reading user data (API output)
+
+# API response — explicitly excludes sensitive fields
 class UserRead(BaseModel):
     id: int
-
-    name: Annotated[
-        str,
-        Field(
-            min_length=2, 
-            max_length=30, 
-            examples=["User Userson"]
-        )
-    ]
-    username: Annotated[
-        str, 
-        Field(
-            min_length=2, 
-            max_length=20, 
-            pattern=r"^[a-z0-9]+$", 
-            examples=["userson"]
-        )
-    ]
-    email: Annotated[EmailStr, Field(examples=["user.userson@example.com"])]
+    name: Annotated[str, Field(min_length=2, max_length=30)]
+    username: Annotated[str, Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$")]
+    email: EmailStr
     profile_image_url: str
+    is_deleted: bool = False
     tier_id: int | None
+    is_superuser: bool = False
+    email_verified: bool = False
+    oauth_provider: str | None = None
 
 
-# Schema for creating new users (API input)
-class UserCreate(UserBase): # Inherits from UserBase
-    model_config = ConfigDict(extra="forbid")
+# API request body for POST /users/
+class UserCreate(UserBase):
+    model_config = ConfigDict(extra="forbid")  # reject unknown fields
 
     password: Annotated[
         str,
         Field(
+            min_length=8,
+            description=(
+                "Password must be at least 8 characters and include a number, "
+                "uppercase letter, lowercase letter, and special character"
+            ),
+            examples=["Str1ngst!"],
             pattern=r"^.{8,}|[0-9]+|[A-Z]+|[a-z]+|[^a-zA-Z0-9]+$",
-            examples=["Str1ngst!"]
-        )
+        ),
     ]
+    # OAuth fields — populated when user signs up via Google/GitHub
+    google_id: str | None = None
+    github_id: str | None = None
+    oauth_provider: str | None = None
 
 
-# Schema that FastCRUD will use to store just the hash
+# What the service writes to the DB (raw password replaced with hash)
 class UserCreateInternal(UserBase):
     hashed_password: str
+    google_id: str | None = None
+    github_id: str | None = None
+    oauth_provider: str | None = None
+    email_verified: bool = False
 
 
-# Schema for updating users
+# Partial update — every field optional
 class UserUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: Annotated[
-        str | None,
-        Field(
-            min_length=2, 
-            max_length=30, 
-            examples=["User Userberg"],
-            default=None
-        )
-    ]
+    name: Annotated[str | None, Field(min_length=2, max_length=30, default=None)]
     username: Annotated[
-        str | None, 
-        Field(
-            min_length=2,
-            max_length=20, 
-            pattern=r"^[a-z0-9]+$", 
-            examples=["userberg"], 
-            default=None
-        )
+        str | None,
+        Field(min_length=2, max_length=20, pattern=r"^[a-z0-9]+$", default=None),
     ]
-    email: Annotated[
-        EmailStr | None, 
-        Field(
-            examples=["user.userberg@example.com"],
-            default=None
-        )
-    ]
+    email: Annotated[EmailStr | None, Field(default=None)]
     profile_image_url: Annotated[
         str | None,
-        Field(
-            pattern=r"^(https?|ftp)://[^\s/$.?#].[^\s]*$",
-            examples=["https://www.profileimageurl.com"],
-            default=None
-        ),
+        Field(pattern=r"^(https?|ftp)://[^\s/$.?#].[^\s]*$", default=None),
     ]
 
 
-# Internal update schema
 class UserUpdateInternal(UserUpdate):
-    updated_at: datetime
+    updated_at: datetime  # service stamps this before persisting
 
 
-# Schema to update tier id
 class UserTierUpdate(BaseModel):
     tier_id: int
 
 
-# Schema for user deletion (soft delete timestamps)
 class UserDelete(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     is_deleted: bool
     deleted_at: datetime
 
 
-# User specific schema
-class UserRestoreDeleted(BaseModel):
-    is_deleted: bool
+# GDPR/LGPD anonymization payload
+class UserAnonymize(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    username: str
+    hashed_password: str | None = None
+    # ...other PII-clearing fields...
 ```
 
-### Key Implementation Details
+### Naming Conventions
 
-**Field Validation**: Uses `Annotated[type, Field(...)]` for validation rules. `Field` parameters include:
+The schemas follow a consistent vocabulary across modules:
 
-- `min_length/max_length` - String length constraints
-- `gt/ge/lt/le` - Numeric constraints  
-- `pattern` - Pattern matching (regex)
-- `default` - Default values
+| Suffix | Use |
+|--------|-----|
+| `Base` | Common fields shared across create/update/full schemas |
+| *(none — class name = `User`)* | Full-record schema (every column, mostly internal) |
+| `Read` | API response — drops sensitive/internal fields |
+| `Create` | API request body for POST |
+| `CreateInternal` | What the service stores (raw password → hashed_password) |
+| `Update` | Partial update body for PATCH (all fields optional) |
+| `UpdateInternal` | What the service stores on update (e.g. with stamped `updated_at`) |
+| `TierUpdate`, `Anonymize`, `Delete`, … | Operation-specific narrow schemas |
 
-**EmailStr**: Validates email format and normalizes the value.
+### Why Internal vs External
 
-**ConfigDict**: Replaces the old `Config` class. `from_attributes=True` allows creating schemas from SQLAlchemy model instances.
+The split between `Create` and `CreateInternal` (and likewise for updates) keeps the API surface honest:
 
-**Internal vs External**: Separate schemas for internal operations (like password hashing) vs API exposure.
+- `UserCreate` accepts `password: str` from the client.
+- The service hashes the password and constructs a `UserCreateInternal` with `hashed_password` instead.
+- `crud_users.create(db=db, object=user_internal)` is what actually hits the database.
+
+The client can never set `hashed_password` directly, and the model never sees a plaintext password.
+
+## Field Validation
+
+### `Annotated` + `Field`
+
+The codebase uses `Annotated[T, Field(...)]` for validation rules:
+
+| `Field` parameter | Effect |
+|-------------------|--------|
+| `min_length` / `max_length` | String length bounds |
+| `pattern` | Regex validation (e.g. `r"^[a-z0-9]+$"` for usernames) |
+| `gt` / `ge` / `lt` / `le` | Numeric bounds |
+| `default` | Default value |
+| `examples` | OpenAPI example values shown in `/docs` |
+| `description` | Doc string visible in OpenAPI |
+
+### `EmailStr`
+
+Pydantic's `EmailStr` validates the email format and normalizes the casing.
+
+### `ConfigDict(extra="forbid")`
+
+Set on `UserCreate`, `UserUpdate`, etc. — anything the client sends beyond the declared fields raises a 422. This matters most for create/update payloads where stray fields could otherwise sneak through.
+
+### `from_attributes`
+
+Use `ConfigDict(from_attributes=True)` when you need to build a Pydantic schema from a SQLAlchemy model instance directly. The boilerplate's services mostly work with dicts (FastCRUD's default return shape), so this is rarely needed — but it's the right setting if you do `UserRead.model_validate(orm_user)`.
 
 ## Schema Patterns
 
-### Base Schema Pattern
-
-```python
-# Common fields shared across operations
-class PostBase(BaseModel):
-    title: Annotated[
-        str, 
-        Field(
-            min_length=1, 
-            max_length=100
-        )
-    ]
-    content: Annotated[
-        str, 
-        Field(
-            min_length=1, 
-            max_length=10000
-        )
-    ]
-
-# Specific operation schemas inherit from base
-class PostCreate(PostBase):
-    pass  # Only title and content needed for creation
-
-class PostRead(PostBase):
-    model_config = ConfigDict(from_attributes=True)
-    
-    id: int
-    created_at: datetime
-    created_by_user_id: int
-    is_deleted: bool = False  # From model's soft delete fields
-```
-
-**Purpose**: Reduces duplication and ensures consistency across related schemas.
-
 ### Optional Fields in Updates
 
-```python
-class PostUpdate(BaseModel):
-    title: Annotated[
-        str | None, 
-        Field(
-            min_length=1, 
-            max_length=100,
-            default=None
-        )
-    ]
-    content: Annotated[
-        str | None, 
-        Field(
-            min_length=1, 
-            max_length=10000,
-            default=None
-        )
-    ]
-```
-
-**Pattern**: All fields optional in update schemas. Only provided fields are updated in the database.
-
-### Nested Schemas
+The convention is **all fields optional** in `*Update` schemas:
 
 ```python
-# Post schema with user information
-class PostWithUser(PostRead):
-    created_by_user: UserRead  # Nested user data
+class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-# Alternative: Custom nested schema
-class PostAuthor(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    
-    id: int
-    username: str
-    # Only include fields needed for this context
-
-class PostRead(PostBase):
-    created_by_user: PostAuthor
+    name: Annotated[str | None, Field(min_length=2, max_length=30, default=None)]
+    email: Annotated[EmailStr | None, Field(default=None)]
+    # ...
 ```
 
-**Usage**: Include related model data in responses without exposing all fields.
-
-## Validation Patterns
+The service then writes only the fields the client actually provided.
 
 ### Custom Validators
+
+For cross-field rules or transforms:
 
 ```python
 from pydantic import field_validator, model_validator
 
-class UserCreateWithConfirm(UserBase):
-    password: str
-    confirm_password: str
-    
-    @field_validator('username')
+
+class WidgetCreate(BaseModel):
+    name: str
+    color: str
+    quantity: int = 1
+
+    @field_validator("name")
     @classmethod
-    def validate_username(cls, v):
-        if v.lower() in ['admin', 'root', 'system']:
-            raise ValueError('Username not allowed')
-        return v.lower()  # Normalize to lowercase
-    
-    @model_validator(mode='after')
-    def validate_passwords_match(self):
-        if self.password != self.confirm_password:
-            raise ValueError('Passwords do not match')
+    def normalize_name(cls, v: str) -> str:
+        if v.lower() in {"admin", "system"}:
+            raise ValueError("Reserved name")
+        return v.strip().lower()
+
+    @model_validator(mode="after")
+    def check_quantity(self) -> "WidgetCreate":
+        if self.color == "rare" and self.quantity > 1:
+            raise ValueError("Rare widgets are limited to one per request")
         return self
 ```
 
-**field_validator**: Validates individual fields. Can transform values.
-
-**model_validator**: Validates across multiple fields. Access to full model data.
+`field_validator` validates one field; `model_validator(mode="after")` runs after all fields are set and can validate combinations.
 
 ### Computed Fields
+
+For values derived at serialization time (not stored):
 
 ```python
 from pydantic import computed_field
 
-class UserReadWithComputed(UserRead):
-    created_at: datetime  # Would need to be added to actual UserRead
-    
+
+class UserReadWithStats(UserRead):
+    created_at: datetime  # add this if your read schema doesn't already have it
+
+    @computed_field
+    @property
+    def display_name(self) -> str:
+        return f"@{self.username}"
+
     @computed_field
     @property
     def age_days(self) -> int:
-        return (datetime.utcnow() - self.created_at).days
-    
-    @computed_field
-    @property  
-    def display_name(self) -> str:
-        return f"@{self.username}"
+        return (datetime.now(UTC) - self.created_at).days
 ```
 
-**Purpose**: Add computed values to API responses without storing them in the database.
+## Multi-Record Responses
 
-### Conditional Validation
-
-```python
-class PostCreate(BaseModel):
-    title: str
-    content: str
-    category: Optional[str] = None
-    is_premium: bool = False
-    
-    @model_validator(mode='after')
-    def validate_premium_content(self):
-        if self.is_premium and not self.category:
-            raise ValueError('Premium posts must have a category')
-        return self
-```
-
-## Schema Configuration
-
-### Model Config Options
+The boilerplate uses **FastCRUD's `PaginatedListResponse`** for paginated list endpoints:
 
 ```python
-class UserRead(BaseModel):
-    model_config = ConfigDict(
-        from_attributes=True,    # Allow creation from SQLAlchemy models
-        extra="forbid",          # Reject extra fields
-        str_strip_whitespace=True,  # Strip whitespace from strings
-        validate_assignment=True,   # Validate on field assignment
-        populate_by_name=True,      # Allow field names and aliases
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+
+
+@router.get("/", response_model=PaginatedListResponse[UserRead])
+async def get_users(
+    db: Annotated[AsyncSession, Depends(async_session)],
+    user_service: Annotated[UserService, Depends(get_user_service)],
+    page: int = 1,
+    items_per_page: int = 10,
+) -> dict[str, Any]:
+    result = await user_service.get_paginated(
+        skip=compute_offset(page, items_per_page),
+        limit=items_per_page,
+        db=db,
     )
+    return paginated_response(crud_data=result, page=page, items_per_page=items_per_page)
 ```
 
-### Field Aliases
+The response shape:
 
-```python
-class UserResponse(BaseModel):
-    user_id: Annotated[
-        int, 
-        Field(alias="id")
-    ]
-    username: str
-    email_address: Annotated[
-        str, 
-        Field(alias="email")
-    ]
-    
-    model_config = ConfigDict(populate_by_name=True)
+```json
+{
+  "data": [{ "id": 1, "name": "...", "username": "..." }],
+  "total_count": 150,
+  "has_more": true,
+  "page": 1,
+  "items_per_page": 10
+}
 ```
 
-**Usage**: API can accept both `id` and `user_id`, `email` and `email_address`.
-
-## Response Schema Patterns
-
-### Multi-Record Responses
-
-[FastCRUD's](https://benavlabs.github.io/fastcrud/) `get_multi` method returns a `GetMultiResponse`:
+For single-record endpoints, return the schema directly:
 
 ```python
-# Using get_multi directly
-users = await crud_users.get_multi(
-    db=db,
-    offset=0,
-    limit=10,
-    schema_to_select=UserRead,
-    return_as_model=True,
-    return_total_count=True
-)
-# Returns GetMultiResponse structure:
-# {
-#   "data": [UserRead, ...],
-#   "total_count": 150
-# }
+@router.get("/me", response_model=UserRead)
+async def me(current_user: Annotated[dict[str, Any], Depends(get_current_user)]):
+    return current_user
 ```
 
-### Paginated Responses
+## Adding Schemas for a New Module
 
-For pagination with page numbers, use `PaginatedListResponse`:
-
-```python
-from fastcrud import PaginatedListResponse
-
-# In API endpoint - ONLY for paginated list responses
-@router.get("/users/", response_model=PaginatedListResponse[UserRead])
-async def get_users(page: int = 1, items_per_page: int = 10):
-    # Returns paginated structure with additional pagination fields:
-    # {
-    #   "data": [UserRead, ...],
-    #   "total_count": 150,
-    #   "has_more": true,
-    #   "page": 1, 
-    #   "items_per_page": 10
-    # }
-
-# Single user endpoints return UserRead directly
-@router.get("/users/{user_id}", response_model=UserRead)
-async def get_user(user_id: int):
-    # Returns single UserRead object:
-    # {
-    #   "id": 1,
-    #   "name": "User Userson", 
-    #   "username": "userson",
-    #   "email": "user.userson@example.com",
-    #   "profile_image_url": "https://...",
-    #   "tier_id": null
-    # }
-```
-
-### Error Response Schemas
+1. **Create the schema file**: `backend/src/modules/widgets/schemas.py`
+2. **Define a `WidgetBase`** with the fields shared by create/update/read
+3. **Add `WidgetCreate`, `WidgetRead`, `WidgetUpdate`** (and any internal variants you need)
+4. **Wire them up** in the module's `routes.py` and `service.py`
 
 ```python
-class ErrorResponse(BaseModel):
-    detail: str
-    error_code: Optional[str] = None
-    
-class ValidationErrorResponse(BaseModel):
-    detail: str
-    errors: list[dict]  # Pydantic validation errors
-```
-
-### Success Response Wrapper
-
-```python
-from typing import Generic, TypeVar
-
-T = TypeVar('T')
-
-class SuccessResponse(BaseModel, Generic[T]):
-    success: bool = True
-    data: T
-    message: Optional[str] = None
-
-# Usage in endpoint
-@router.post("/users/", response_model=SuccessResponse[UserRead])
-async def create_user(user_data: UserCreate):
-    user = await crud_users.create(db=db, object=user_data)
-    return SuccessResponse(data=user, message="User created successfully")
-```
-
-## Creating New Schemas
-
-### Step-by-Step Process
-
-1. **Create schema file** in `src/app/schemas/your_model.py`
-2. **Define base schema** with common fields
-3. **Create operation-specific schemas** (Create, Read, Update, Delete)
-4. **Add validation rules** as needed
-5. **Import in __init__.py** for easy access
-
-### Example: Category Schemas
-
-```python
-# src/app/schemas/category.py
+# backend/src/modules/widgets/schemas.py
 from datetime import datetime
 from typing import Annotated
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-class CategoryBase(BaseModel):
-    name: Annotated[
-        str, 
-        Field(
-            min_length=1, 
-            max_length=50
-        )
-    ]
-    description: Annotated[
-        str | None, 
-        Field(
-            max_length=255,
-            default=None
-        )
-    ]
+from ..common.schemas import TimestampSchema
 
-class CategoryCreate(CategoryBase):
-    pass
 
-class CategoryRead(CategoryBase):
+class WidgetBase(BaseModel):
+    name: Annotated[str, Field(min_length=1, max_length=50)]
+    description: Annotated[str | None, Field(max_length=255, default=None)]
+
+
+class WidgetCreate(WidgetBase):
+    model_config = ConfigDict(extra="forbid")
+
+
+class WidgetRead(WidgetBase):
     model_config = ConfigDict(from_attributes=True)
-    
     id: int
+    owner_id: int
     created_at: datetime
 
-class CategoryUpdate(BaseModel):
-    name: Annotated[
-        str | None, 
-        Field(
-            min_length=1, 
-            max_length=50,
-            default=None
-        )
-    ]
-    description: Annotated[
-        str | None, 
-        Field(
-            max_length=255,
-            default=None
-        )
-    ]
 
-class CategoryWithPosts(CategoryRead):
-    posts: list[PostRead] = []  # Include related posts
-```
-
-### Import in __init__.py
-
-```python
-# src/app/schemas/__init__.py
-from .user import UserCreate, UserRead, UserUpdate
-from .post import PostCreate, PostRead, PostUpdate
-from .category import CategoryCreate, CategoryRead, CategoryUpdate
-```
-
-## Schema Testing
-
-### Validation Testing
-
-```python
-# tests/test_schemas.py
-import pytest
-from pydantic import ValidationError
-from app.schemas.user import UserCreate
-
-def test_user_create_valid():
-    user_data = {
-        "name": "Test User",
-        "username": "testuser",
-        "email": "test@example.com",
-        "password": "Str1ngst!"
-    }
-    user = UserCreate(**user_data)
-    assert user.username == "testuser"
-    assert user.name == "Test User"
-
-def test_user_create_invalid_email():
-    with pytest.raises(ValidationError) as exc_info:
-        UserCreate(
-            name="Test User",
-            username="test",
-            email="invalid-email",
-            password="Str1ngst!"
-        )
-    
-    errors = exc_info.value.errors()
-    assert any(error['type'] == 'value_error' for error in errors)
-
-def test_password_validation():
-    with pytest.raises(ValidationError) as exc_info:
-        UserCreate(
-            name="Test User",
-            username="test", 
-            email="test@example.com",
-            password="123"  # Doesn't match pattern
-        )
-```
-
-### Serialization Testing
-
-```python
-from app.models.user import User
-from app.schemas.user import UserRead
-
-def test_user_read_from_model():
-    # Create model instance
-    user_model = User(
-        id=1,
-        name="Test User",
-        username="testuser",
-        email="test@example.com",
-        profile_image_url="https://example.com/image.jpg",
-        hashed_password="hashed123",
-        is_superuser=False,
-        tier_id=None,
-        created_at=datetime.utcnow()
-    )
-    
-    # Convert to schema
-    user_schema = UserRead.model_validate(user_model)
-    assert user_schema.username == "testuser"
-    assert user_schema.id == 1
-    assert user_schema.name == "Test User"
-    # hashed_password not included in UserRead
+class WidgetUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: Annotated[str | None, Field(min_length=1, max_length=50, default=None)]
+    description: Annotated[str | None, Field(max_length=255, default=None)]
 ```
 
 ## Common Pitfalls
 
-### Model vs Schema Field Names
+### Don't expose sensitive fields
 
 ```python
-# DON'T - Exposing sensitive fields
+# BAD — leaks the password hash
 class UserRead(BaseModel):
-    hashed_password: str  # Never expose password hashes
+    hashed_password: str
 
-# DO - Only expose safe fields  
+# GOOD — read-only public shape
 class UserRead(BaseModel):
     id: int
     name: str
     username: str
-    email: str
+    email: EmailStr
     profile_image_url: str
-    tier_id: int | None
 ```
 
-### Validation Performance
+### Don't query the database in validators
 
 ```python
-# DON'T - Complex validation in every request
-@field_validator('email')
-@classmethod  
-def validate_email_unique(cls, v):
-    # Database query in validator - slow!
-    if crud_users.exists(email=v):
-        raise ValueError('Email already exists')
+# BAD — every request hits the DB twice
+@field_validator("email")
+@classmethod
+def email_must_be_unique(cls, v):
+    if crud_users.exists(email=v):  # I/O in a validator
+        raise ValueError("Email already exists")
 
-# DO - Handle uniqueness in business logic
-# Let database unique constraints handle this
+# GOOD — let the DB unique constraint and service-layer logic handle it
 ```
+
+The boilerplate's `UserService.create` already checks for duplicates before insert. The DB unique constraint is the final guardrail.
+
+### Don't reuse the same schema for create and update
+
+A `Create` schema requires fields that an `Update` schema should be able to omit. Splitting them avoids accidental "this field defaulted because the client forgot it" bugs.
 
 ## Next Steps
 
-Now that you understand schema implementation:
-
-1. **[CRUD Operations](crud.md)** - Learn how schemas integrate with database operations
-2. **[Migrations](migrations.md)** - Manage database schema changes
-3. **[API Endpoints](../api/endpoints.md)** - Use schemas in FastAPI endpoints
-
-The next section covers CRUD operations and how they use these schemas for data validation and transformation.
+1. **[CRUD Operations](crud.md)** - How schemas plug into FastCRUD
+2. **[Migrations](migrations.md)** - Manage the underlying database changes
+3. **[API Endpoints](../api/endpoints.md)** - Use schemas in route handlers

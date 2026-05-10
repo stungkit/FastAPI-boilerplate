@@ -1,6 +1,6 @@
 # Configuration
 
-Learn how to configure your FastAPI Boilerplate application for different environments and use cases. Everything is configured through environment variables and Python settings classes.
+Learn how to configure your FastAPI Boilerplate application for different environments. Configuration is driven by environment variables and validated by Python settings classes.
 
 ## What You'll Learn
 
@@ -11,301 +11,272 @@ Learn how to configure your FastAPI Boilerplate application for different enviro
 
 ## Quick Start
 
-The boilerplate uses environment variables as the primary configuration method:
-
 ```bash
-# Copy the example file
-cp src/.env.example src/.env
-
-# Edit with your values
-nano src/.env
+cd backend
+cp .env.example .env
+$EDITOR .env
 ```
 
-Essential variables to set:
+Essential variables:
 
 ```env
 # Application
-APP_NAME="My FastAPI App"
-SECRET_KEY="your-super-secret-key-here"
+APP_NAME=My FastAPI App
+SECRET_KEY=your-super-secret-key-here
 
 # Database
-POSTGRES_USER="your_user"
-POSTGRES_PASSWORD="your_password"
-POSTGRES_DB="your_database"
+POSTGRES_USER=your_user
+POSTGRES_PASSWORD=your_password
+POSTGRES_DB=your_database
 
-# Admin Account
-ADMIN_EMAIL="admin@example.com"
-ADMIN_PASSWORD="secure_password"
+# Admin Account (used by setup_initial_data)
+ADMIN_NAME=Admin User
+ADMIN_EMAIL=admin@example.com
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=secure_password
 ```
 
 ## Configuration Architecture
 
-The configuration system has three layers:
-
 ```
-Environment Variables (.env files)
+Environment Variables (.env file)
          ↓
-Settings Classes (Python validation)
+Settings Classes (Pydantic BaseSettings)
          ↓
-Application Configuration (Runtime)
+Application Code (via get_settings())
 ```
 
 ### Layer 1: Environment Variables
-Primary configuration through `.env` files:
+
+Primary configuration through `backend/.env`:
+
 ```env
-POSTGRES_USER="myuser"
-POSTGRES_PASSWORD="mypassword"
-REDIS_CACHE_HOST="localhost"
-SECRET_KEY="your-secret-key"
+POSTGRES_USER=myuser
+POSTGRES_PASSWORD=mypassword
+CACHE_REDIS_HOST=localhost
+SECRET_KEY=your-secret-key
 ```
 
 ### Layer 2: Settings Classes
-Python classes that validate and structure configuration:
+
+Pydantic `BaseSettings` classes in `src/infrastructure/config/settings.py` validate and structure config:
+
 ```python
-class PostgresSettings(BaseSettings):
-    POSTGRES_USER: str
-    POSTGRES_PASSWORD: str = Field(min_length=8)
-    POSTGRES_SERVER: str = "localhost"
-    POSTGRES_PORT: int = 5432
-    POSTGRES_DB: str
+class DatabaseSettings(BaseSettings):
+    POSTGRES_USER: str = config("POSTGRES_USER", default="postgres")
+    POSTGRES_PASSWORD: str = config("POSTGRES_PASSWORD", default="postgres")
+    POSTGRES_SERVER: str = config("POSTGRES_SERVER", default="localhost")
+    POSTGRES_PORT: int = config("POSTGRES_PORT", default=5432)
+    POSTGRES_DB: str = config("POSTGRES_DB", default="postgres")
 ```
 
-### Layer 3: Application Use
-Configuration injected throughout the application:
-```python
-from app.core.config import settings
+A single composite `Settings` class combines them all.
 
-# Use anywhere in your code
-DATABASE_URL = f"postgresql+asyncpg://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_SERVER}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+### Layer 3: Application Use
+
+Pull settings anywhere in the app via `get_settings()`:
+
+```python
+from src.infrastructure.config.settings import get_settings
+
+settings = get_settings()
+print(settings.DATABASE_URL)
 ```
 
 ## Key Configuration Areas
 
-### Security Settings
-```env
-SECRET_KEY="your-super-secret-key-here"
-ALGORITHM="HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-REFRESH_TOKEN_EXPIRE_DAYS=7
-```
-
-### Database Configuration
-```env
-POSTGRES_USER="your_user"
-POSTGRES_PASSWORD="your_password"
-POSTGRES_SERVER="localhost"
-POSTGRES_PORT=5432
-POSTGRES_DB="your_database"
-```
-
-### Redis Services
-```env
-# Cache
-REDIS_CACHE_HOST="localhost"
-REDIS_CACHE_PORT=6379
-
-# Background jobs
-REDIS_QUEUE_HOST="localhost"
-REDIS_QUEUE_PORT=6379
-
-# Rate limiting  
-REDIS_RATE_LIMIT_HOST="localhost"
-REDIS_RATE_LIMIT_PORT=6379
-```
-
 ### Application Settings
+
 ```env
-APP_NAME="Your App Name"
-APP_VERSION="1.0.0"
-ENVIRONMENT="local"  # local, staging, production
-DEBUG=true
+APP_NAME=Your App Name
+VERSION=1.0.0
+ENVIRONMENT=development  # development | staging | production | local
+DEBUG=false
+```
+
+### Database
+
+```env
+POSTGRES_USER=your_user
+POSTGRES_PASSWORD=your_password
+POSTGRES_SERVER=localhost   # use "db" with Docker Compose
+POSTGRES_PORT=5432
+POSTGRES_DB=your_database
+CREATE_TABLES_ON_STARTUP=true
+```
+
+### Security & Sessions
+
+```env
+SECRET_KEY=your-super-secret-key-here
+
+SESSION_TIMEOUT_MINUTES=30
+SESSION_SECURE_COOKIES=true
+SESSION_BACKEND=redis
+CSRF_ENABLED=true
+LOGIN_MAX_ATTEMPTS=5
+LOGIN_WINDOW_MINUTES=15
+```
+
+### Cache (Redis or Memcached)
+
+```env
+CACHE_ENABLED=true
+CACHE_BACKEND=redis           # or "memcached"
+CACHE_REDIS_HOST=localhost    # use "redis" with Docker Compose
+CACHE_REDIS_PORT=6379
+CACHE_REDIS_DB=0
+DEFAULT_CACHE_EXPIRATION=3600
+```
+
+### Background Tasks (Taskiq)
+
+```env
+TASKIQ_ENABLED=true
+TASKIQ_BROKER_TYPE=redis      # or "rabbitmq"
+TASKIQ_REDIS_HOST=localhost   # use "redis" with Docker Compose
+TASKIQ_REDIS_PORT=6379
+TASKIQ_REDIS_DB=3
 ```
 
 ### Rate Limiting
+
 ```env
+RATE_LIMITER_ENABLED=true
+RATE_LIMITER_BACKEND=redis
+RATE_LIMITER_REDIS_HOST=localhost
+RATE_LIMITER_REDIS_DB=1
 DEFAULT_RATE_LIMIT_LIMIT=100
-DEFAULT_RATE_LIMIT_PERIOD=3600  # 1 hour in seconds
+DEFAULT_RATE_LIMIT_PERIOD=60
 ```
 
-### Admin User
+### Admin User (Initial Setup)
+
+Read by `python -m scripts.setup_initial_data` on first run:
+
 ```env
-ADMIN_NAME="Admin User"
-ADMIN_EMAIL="admin@example.com"
-ADMIN_USERNAME="admin"
-ADMIN_PASSWORD="secure_password"
+ADMIN_NAME=Admin User
+ADMIN_EMAIL=admin@example.com
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=secure_password
 ```
 
 ## Environment-Specific Configurations
 
 ### Development
+
 ```env
-ENVIRONMENT="local"
+ENVIRONMENT=development
 DEBUG=true
-POSTGRES_SERVER="localhost"
-REDIS_CACHE_HOST="localhost"
-ACCESS_TOKEN_EXPIRE_MINUTES=60  # Longer for development
+POSTGRES_SERVER=localhost
+CACHE_REDIS_HOST=localhost
+TASKIQ_REDIS_HOST=localhost
+RATE_LIMITER_REDIS_HOST=localhost
 ```
 
 ### Staging
+
 ```env
-ENVIRONMENT="staging"
+ENVIRONMENT=staging
 DEBUG=false
-POSTGRES_SERVER="staging-db.example.com"
-REDIS_CACHE_HOST="staging-redis.example.com"
-ACCESS_TOKEN_EXPIRE_MINUTES=30
+POSTGRES_SERVER=staging-db.example.com
+CACHE_REDIS_HOST=staging-redis.example.com
+SESSION_SECURE_COOKIES=true
 ```
 
 ### Production
+
 ```env
-ENVIRONMENT="production"
+ENVIRONMENT=production
 DEBUG=false
-POSTGRES_SERVER="prod-db.example.com"
-REDIS_CACHE_HOST="prod-redis.example.com"
-ACCESS_TOKEN_EXPIRE_MINUTES=15
-# Use custom ports for security
-POSTGRES_PORT=5433
-REDIS_CACHE_PORT=6380
+POSTGRES_SERVER=prod-db.example.com
+CACHE_REDIS_HOST=prod-redis.example.com
+PRODUCTION_SECURITY_VALIDATION_ENABLED=true
+PRODUCTION_SECURITY_STRICT_MODE=true
+ENABLE_DOCS_IN_PRODUCTION=false
 ```
 
 ## Docker Configuration
 
-### Basic Setup
-Docker Compose automatically loads your `.env` file:
+Docker Compose loads variables from `.env` automatically. With Compose, services reach each other by service name:
 
-```yaml
-services:
-  web:
-    env_file:
-      - ./src/.env
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+```env
+POSTGRES_SERVER=db
+CACHE_REDIS_HOST=redis
+RATE_LIMITER_REDIS_HOST=redis
+TASKIQ_REDIS_HOST=redis
 ```
 
 ### Service Overview
+
 ```yaml
 services:
-  web:          # FastAPI application
-  db:           # PostgreSQL database  
-  redis:        # Redis for caching/queues
-  worker:       # Background task worker
+  web:    # FastAPI application
+  db:     # PostgreSQL
+  redis:  # Cache, rate limiting, sessions, taskiq broker
 ```
+
+To run a Taskiq worker, add a worker service to your Compose file with the command `taskiq worker infrastructure.taskiq.worker:default_broker`.
 
 ## Common Configuration Patterns
 
-### Feature Flags
-```python
-# In settings class
-class FeatureSettings(BaseSettings):
-    ENABLE_CACHING: bool = True
-    ENABLE_ANALYTICS: bool = False
-    ENABLE_BACKGROUND_JOBS: bool = True
+### Feature Toggles
 
-# Use in code
-if settings.ENABLE_CACHING:
-    cache_result = await get_from_cache(key)
+The boilerplate already exposes toggles like `CACHE_ENABLED`, `RATE_LIMITER_ENABLED`, `TASKIQ_ENABLED`, `ADMIN_ENABLED`, and `CSRF_ENABLED`. You can add your own in a settings class:
+
+```python
+class FeatureSettings(BaseSettings):
+    ENABLE_ANALYTICS: bool = config("ENABLE_ANALYTICS", default=False, cast=bool)
+```
+
+Then use it:
+
+```python
+from src.infrastructure.config.settings import get_settings
+
+if get_settings().ENABLE_ANALYTICS:
+    track_event(...)
 ```
 
 ### Environment Detection
-```python
-@app.get("/docs", include_in_schema=False)
-async def custom_swagger_ui():
-    if settings.ENVIRONMENT == "production":
-        raise HTTPException(404, "Documentation not available")
-    return get_swagger_ui_html(openapi_url="/openapi.json")
-```
 
-### Health Checks
 ```python
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "environment": settings.ENVIRONMENT,
-        "version": settings.APP_VERSION,
-        "database": await check_database_health(),
-        "redis": await check_redis_health()
-    }
-```
+from src.infrastructure.config.settings import EnvironmentOption, get_settings
 
-## Quick Configuration Tasks
+if get_settings().ENVIRONMENT == EnvironmentOption.PRODUCTION:
+    ...
+```
 
 ### Generate Secret Key
+
 ```bash
-# Generate a secure secret key
-openssl rand -hex 32
-```
-
-### Test Configuration
-```python
-# test_config.py
-from app.core.config import settings
-
-print(f"App: {settings.APP_NAME}")
-print(f"Environment: {settings.ENVIRONMENT}")
-print(f"Database: {settings.POSTGRES_DB}")
-```
-
-### Environment File Templates
-```bash
-# Development
-cp src/.env.example src/.env.development
-
-# Staging  
-cp src/.env.example src/.env.staging
-
-# Production
-cp src/.env.example src/.env.production
+python -c "import secrets; print(secrets.token_urlsafe(64))"
 ```
 
 ## Best Practices
 
 ### Security
-- Never commit `.env` files to version control
-- Use different secret keys for each environment
+- Never commit `.env` to version control
+- Use a unique strong `SECRET_KEY` per environment
 - Disable debug mode in production
-- Use secure passwords and keys
+- Set `ENVIRONMENT=production` to enable the security validator
+- Restrict `CORS_ORIGINS` to specific domains
 
 ### Performance
-- Configure appropriate connection pool sizes
-- Set reasonable token expiration times
-- Use Redis for caching in production
-- Configure proper rate limits
+- Tune `POSTGRES_POOL_SIZE` and `POSTGRES_MAX_OVERFLOW` for your workload
+- Use separate Redis databases for cache (`CACHE_REDIS_DB=0`), rate limiting (`RATE_LIMITER_REDIS_DB=1`), and taskiq (`TASKIQ_REDIS_DB=3`)
+- Set sensible `SESSION_TIMEOUT_MINUTES` and `MAX_SESSIONS_PER_USER`
 
 ### Maintenance
-- Document all custom environment variables
-- Use validation in settings classes
-- Test configurations in staging first
-- Monitor configuration changes
-
-### Testing
-- Use separate test environment variables
-- Mock external services in tests
-- Validate configuration on startup
-- Test with different environment combinations
+- Document custom environment variables in `.env.example`
+- Add validation in settings classes (Pydantic types catch most issues)
+- Test configurations in staging before production
 
 ## Getting Started
 
-Follow this path to configure your application:
+1. **[Environment Variables](environment-variables.md)** - Complete reference of every variable
+2. **[Settings Classes](settings-classes.md)** - How config is organized in Python
+3. **[Docker Setup](docker-setup.md)** - Compose files and overrides
+4. **[Environment-Specific](environment-specific.md)** - Per-environment best practices
 
-### 1. **[Environment Variables](environment-variables.md)** - Start here
-Learn about all available environment variables, their purposes, and recommended values for different environments.
-
-### 2. **[Settings Classes](settings-classes.md)** - Validation layer
-Understand how Python settings classes validate and structure your configuration with type hints and validation rules.
-
-### 3. **[Docker Setup](docker-setup.md)** - Container configuration
-Configure Docker Compose services, networking, and environment-specific overrides.
-
-### 4. **[Environment-Specific](environment-specific.md)** - Deployment configs
-Set up configuration for development, staging, and production environments with best practices.
-
-## What's Next
-
-Each guide provides practical examples and copy-paste configurations:
-
-1. **[Environment Variables](environment-variables.md)** - Complete reference and examples
-2. **[Settings Classes](settings-classes.md)** - Custom validation and organization
-3. **[Docker Setup](docker-setup.md)** - Service configuration and overrides
-4. **[Environment-Specific](environment-specific.md)** - Production-ready configurations
-
-The boilerplate provides sensible defaults - just customize what you need! 
+The boilerplate ships with sensible defaults — only override what you need.

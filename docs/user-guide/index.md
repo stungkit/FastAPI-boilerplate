@@ -27,13 +27,13 @@ This guide covers all aspects of working with the FastAPI Boilerplate:
 - **[API Versioning](api/versioning.md)** - Manage API versions and backward compatibility
 
 ### Security & Authentication
-- **[Authentication Overview](authentication/index.md)** - Secure your API with JWT authentication
-- **[JWT Tokens](authentication/jwt-tokens.md)** - Understand access and refresh token management
+- **[Authentication Overview](authentication/index.md)** - Secure your API with session-based auth, OAuth, and API keys
+- **[Sessions](authentication/sessions.md)** - Server-side sessions with HTTP-only cookies and CSRF protection
 - **[User Management](authentication/user-management.md)** - Handle user registration, login, and profiles
 - **[Permissions](authentication/permissions.md)** - Implement role-based access control
 
 ### Admin Panel
-Powered by [CRUDAdmin](https://github.com/benavlabs/crudadmin) - a modern admin interface generator for FastAPI.
+Powered by [SQLAdmin](https://aminalaee.dev/sqladmin/) - a flexible admin interface generated from your SQLAlchemy models.
 
 - **[Admin Panel Overview](admin-panel/index.md)** - Web-based database management interface
 - **[Configuration](admin-panel/configuration.md)** - Setup, session backends, and environment variables
@@ -47,7 +47,7 @@ Powered by [CRUDAdmin](https://github.com/benavlabs/crudadmin) - a modern admin 
 - **[Cache Strategies](caching/cache-strategies.md)** - Advanced caching patterns and invalidation
 
 ### Background Processing
-- **[Background Tasks](background-tasks/index.md)** - Handle long-running operations with ARQ
+- **[Background Tasks](background-tasks/index.md)** - Handle long-running operations with Taskiq (Redis or RabbitMQ broker)
 
 ### Rate Limiting
 - **[Rate Limiting](rate-limiting/index.md)** - Protect your API from abuse with Redis-based rate limiting

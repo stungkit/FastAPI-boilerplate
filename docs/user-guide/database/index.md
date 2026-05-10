@@ -4,232 +4,313 @@ Learn how to work with the database layer in the FastAPI Boilerplate. This secti
 
 ## What You'll Learn
 
-- **[Models](models.md)** - Define database tables with SQLAlchemy models
-- **[Schemas](schemas.md)** - Validate and serialize data with Pydantic schemas  
-- **[CRUD Operations](crud.md)** - Perform database operations with FastCRUD
-- **[Migrations](migrations.md)** - Manage database schema changes with Alembic
+- **[Models](models.md)** - Define database tables with SQLAlchemy 2.0
+- **[Schemas](schemas.md)** - Validate and serialize data with Pydantic
+- **[CRUD Operations](crud.md)** - Database access via FastCRUD
+- **[Migrations](migrations.md)** - Manage schema changes with Alembic
 
 ## Quick Overview
 
-The boilerplate uses a layered architecture that separates concerns:
+The boilerplate splits the data layer across each feature module so a feature owns its full stack:
 
 ```python
-# API Endpoint
+# modules/user/routes.py — request comes in, validated by UserCreate
 @router.post("/", response_model=UserRead)
-async def create_user(user_data: UserCreate, db: AsyncSession):
-    return await crud_users.create(db=db, object=user_data)
+async def create_user(
+    user: UserCreate,
+    db: Annotated[AsyncSession, Depends(async_session)],
+    user_service: Annotated[UserService, Depends(get_user_service)],
+):
+    return await user_service.create(user, db)
 
-# The layers work together:
-# 1. UserCreate schema validates the input
-# 2. crud_users handles the database operation  
-# 3. User model defines the database table
-# 4. UserRead schema formats the response
+# modules/user/service.py — business logic, calls into FastCRUD
+# modules/user/crud.py    — crud_users = FastCRUD(User)
+# modules/user/models.py  — User SQLAlchemy model
 ```
 
 ## Architecture
 
-The database layer follows a clear separation:
-
+```text
+HTTP Request
+    ↓
+Pydantic Schema      (modules/<feature>/schemas.py)
+    ↓
+APIRouter            (modules/<feature>/routes.py)
+    ↓
+Service              (modules/<feature>/service.py)
+    ↓
+FastCRUD             (modules/<feature>/crud.py)
+    ↓
+SQLAlchemy Model     (modules/<feature>/models.py)
+    ↓
+PostgreSQL
 ```
-API Request
-    ↓
-Pydantic Schema (validation & serialization)
-    ↓
-CRUD Layer (business logic & database operations)
-    ↓
-SQLAlchemy Model (database table definition)
-    ↓
-PostgreSQL Database
-```
 
-## Key Features
+The service layer holds business rules (permission checks, multi-step orchestration). FastCRUD handles the boilerplate query plumbing. The model defines the table.
 
-### 🗄️ **SQLAlchemy 2.0 Models**
-Modern async SQLAlchemy with type hints:
+## Key Components
+
+### SQLAlchemy 2.0 Models
+
+Models inherit from `Base` (a `DeclarativeBase` + `MappedAsDataclass` combination) and the relevant mixins:
+
 ```python
-class User(Base):
+# modules/user/models.py
+from sqlalchemy import String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from ...infrastructure.database.session import Base
+from ...infrastructure.database.models import SoftDeleteMixin, TimestampMixin
+
+
+class User(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "user"
-    
-    id: Mapped[int] = mapped_column(primary_key=True)
-    username: Mapped[str] = mapped_column(String(50), unique=True)
-    email: Mapped[str] = mapped_column(String(100), unique=True)
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    username: Mapped[str] = mapped_column(String(20), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    hashed_password: Mapped[str] = mapped_column(String(100))
 ```
 
-### ✅ **Pydantic Schemas**
-Automatic validation and serialization:
+Available mixins from `infrastructure/database/models.py`:
+
+- `TimestampMixin` — adds `created_at` and `updated_at`
+- `SoftDeleteMixin` — adds `is_deleted` and `deleted_at`
+- `UUIDMixin` — UUID primary key (alternative to integer ids)
+
+### Pydantic Schemas
+
+Schemas live alongside the model and split into request/response shapes:
+
 ```python
+# modules/user/schemas.py
+from pydantic import BaseModel, EmailStr, Field
+
+
 class UserCreate(BaseModel):
-    username: str = Field(min_length=2, max_length=50)
+    name: str = Field(min_length=2, max_length=30)
+    username: str = Field(min_length=2, max_length=20)
     email: EmailStr
     password: str = Field(min_length=8)
 
+
 class UserRead(BaseModel):
     id: int
+    name: str
     username: str
-    email: str
-    created_at: datetime
-    # Note: no password field in read schema
+    email: EmailStr
+    # No hashed_password — schemas exclude sensitive fields
 ```
 
-### 🔧 **FastCRUD Operations**
-Consistent database operations:
+### FastCRUD Operations
+
+Each module exposes a thin FastCRUD wrapper:
+
 ```python
+# modules/user/crud.py
+from fastcrud import FastCRUD
+from .models import User
+
+crud_users: FastCRUD = FastCRUD(User)
+```
+
+Then in the service:
+
+```python
+# modules/user/service.py
+from .crud import crud_users
+
 # Create
 user = await crud_users.create(db=db, object=user_create)
 
-# Read
+# Read one
 user = await crud_users.get(db=db, id=user_id)
-users = await crud_users.get_multi(db=db, offset=0, limit=10)
 
-# Update  
-user = await crud_users.update(db=db, object=user_update, id=user_id)
+# Read many
+result = await crud_users.get_multi(db=db, offset=0, limit=10)
 
-# Delete (soft delete)
+# Update
+await crud_users.update(db=db, object=user_update, id=user_id)
+
+# Soft delete (sets is_deleted=True via the mixin)
 await crud_users.delete(db=db, id=user_id)
+
+# Hard delete
+await crud_users.db_delete(db=db, id=user_id)
 ```
 
-### 🔄 **Database Migrations**
-Track schema changes with Alembic:
+### Database Migrations
+
+Run from `backend/`:
+
 ```bash
-# Generate migration
-alembic revision --autogenerate -m "Add user table"
+# Generate a migration from model changes
+uv run alembic revision --autogenerate -m "Add user table"
 
 # Apply migrations
-alembic upgrade head
+uv run alembic upgrade head
 
-# Rollback if needed
-alembic downgrade -1
+# Roll back the most recent migration
+uv run alembic downgrade -1
 ```
 
 ## Database Setup
 
-The boilerplate is configured for PostgreSQL with async support:
+The boilerplate uses async PostgreSQL via `asyncpg`.
 
 ### Environment Configuration
-```bash
-# .env file
-POSTGRES_USER=your_user
-POSTGRES_PASSWORD=your_password
-POSTGRES_SERVER=localhost
+
+```env
+# backend/.env
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_SERVER=localhost     # or "db" for Docker Compose
 POSTGRES_PORT=5432
-POSTGRES_DB=your_database
+POSTGRES_DB=postgres
+POSTGRES_ASYNC_PREFIX=postgresql+asyncpg://
+POSTGRES_POOL_SIZE=20
+POSTGRES_MAX_OVERFLOW=0
+CREATE_TABLES_ON_STARTUP=true
 ```
 
-### Connection Management
-```python
-# Database session dependency
-async def async_get_db() -> AsyncIterator[AsyncSession]:
-    async with async_session_maker() as session:
-        yield session
+The `DATABASE_URL` property on `DatabaseSettings` is computed from these. If you set `DATABASE_URL` directly in the environment it overrides everything else.
 
-# Use in endpoints
-@router.get("/users/")
-async def get_users(db: Annotated[AsyncSession, Depends(async_get_db)]):
-    return await crud_users.get_multi(db=db)
+### Connection Management
+
+The session dependency lives in `infrastructure/database/session.py`:
+
+```python
+from collections.abc import AsyncGenerator
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def async_session() -> AsyncGenerator[AsyncSession, None]:
+    async with local_session() as db:
+        yield db
+```
+
+Use it in routes via FastAPI's `Depends`:
+
+```python
+from typing import Annotated
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ...infrastructure.database.session import async_session
+
+
+@router.get("/")
+async def list_users(
+    db: Annotated[AsyncSession, Depends(async_session)],
+):
+    ...
 ```
 
 ## Included Models
 
-The boilerplate includes four example models:
+The boilerplate ships with these models (one per feature module):
 
-### **User Model** - Authentication & user management
-- Username, email, password (hashed)
-- Soft delete support
-- Tier-based access control
+### `User` — `modules/user/models.py`
+- Username, email, hashed password, full name, profile image
+- OAuth fields: `oauth_provider`, `google_id`, `github_id`
+- Foreign key to `tier`
+- Mixins: `TimestampMixin`, `SoftDeleteMixin`
+- Table name: **`user`** (singular)
 
-### **Post Model** - Content with user relationships  
-- Title, content, creation metadata
-- Foreign key to user (no SQLAlchemy relationships)
-- Soft delete built-in
+### `Tier` — `modules/tier/models.py`
+- Just `name` and `description` — no pricing or business logic
+- One-to-many relationship with users
+- Mixins: `TimestampMixin`, `SoftDeleteMixin`
+- Table name: **`tiers`**
 
-### **Tier Model** - User subscription levels
-- Name-based tiers (free, premium, etc.)
-- Links to rate limiting system
+### `RateLimit` — `modules/rate_limit/models.py`
+- Per-tier rate limits keyed by API path
+- Fields: `tier_id`, `name`, `path`, `limit`, `period`
+- Mixins: `TimestampMixin`, `SoftDeleteMixin`
+- Table name: **`rate_limits`**
 
-### **Rate Limit Model** - API access control
-- Path-specific rate limits per tier
-- Configurable limits and time periods
+### `APIKey`, `KeyUsage`, `KeyPermission` — `modules/api_keys/models.py`
+- API key issuance with per-key permissions and usage tracking
+- Table names: `api_keys`, `key_usage`, `key_permissions`
 
 ## Directory Structure
 
+Each feature owns its data stack:
+
 ```text
-src/app/
-├── models/                 # SQLAlchemy models (database tables)
-│   ├── __init__.py        
-│   ├── user.py           # User table definition
-│   ├── post.py           # Post table definition
-│   └── ...
-├── schemas/                # Pydantic schemas (validation)
-│   ├── __init__.py
-│   ├── user.py           # User validation schemas
-│   ├── post.py           # Post validation schemas  
-│   └── ...
-├── crud/                   # Database operations
-│   ├── __init__.py
-│   ├── crud_users.py     # User CRUD operations
-│   ├── crud_posts.py     # Post CRUD operations
-│   └── ...
-└── core/db/               # Database configuration
-    ├── database.py       # Connection and session setup
-    └── models.py         # Base classes and mixins
+backend/src/
+├── infrastructure/
+│   └── database/
+│       ├── session.py        # engine, async_session dep, Base class, create_tables
+│       └── models.py         # TimestampMixin, SoftDeleteMixin, UUIDMixin
+└── modules/
+    ├── user/
+    │   ├── models.py         # SQLAlchemy User
+    │   ├── schemas.py        # Pydantic UserCreate/UserRead/UserUpdate
+    │   ├── crud.py           # crud_users = FastCRUD(User)
+    │   ├── service.py        # UserService (business rules)
+    │   └── routes.py         # /api/v1/users endpoints
+    ├── tier/
+    ├── rate_limit/
+    └── api_keys/
 ```
+
+The shared `Base` and mixins are in `infrastructure/database/`. Everything feature-specific is colocated under the module.
 
 ## Common Patterns
 
 ### Create with Validation
+
 ```python
-@router.post("/users/", response_model=UserRead)
+@router.post("/", response_model=UserRead, status_code=201)
 async def create_user(
-    user_data: UserCreate,  # Validates input automatically
-    db: Annotated[AsyncSession, Depends(async_get_db)]
+    user: UserCreate,
+    db: Annotated[AsyncSession, Depends(async_session)],
+    user_service: Annotated[UserService, Depends(get_user_service)],
 ):
-    # Check for duplicates
-    if await crud_users.exists(db=db, email=user_data.email):
-        raise DuplicateValueException("Email already exists")
-    
-    # Create user (password gets hashed automatically)
-    return await crud_users.create(db=db, object=user_data)
+    # service.create checks for duplicate username/email and hashes the password
+    return await user_service.create(user, db)
 ```
 
 ### Query with Filters
+
 ```python
-# Get active users only
-users = await crud_users.get_multi(
+# Active users only (excludes soft-deleted)
+result = await crud_users.get_multi(
     db=db,
-    is_active=True,
     is_deleted=False,
     offset=0,
-    limit=10
+    limit=10,
 )
 
-# Search users
-users = await crud_users.get_multi(
+# Substring search
+result = await crud_users.get_multi(
     db=db,
-    username__icontains="john",  # Contains "john"
-    schema_to_select=UserRead
+    username__icontains="john",
+    schema_to_select=UserRead,
 )
 ```
 
+FastCRUD supports `__` operators on field names (`__contains`, `__icontains`, `__gt`, `__lt`, `__in`, etc.).
+
 ### Soft Delete Pattern
+
+The `SoftDeleteMixin` adds `is_deleted` and `deleted_at`. FastCRUD's `.delete()` flips the flag without removing the row:
+
 ```python
-# Soft delete (sets is_deleted=True)
+# Soft delete (default for models with the mixin)
 await crud_users.delete(db=db, id=user_id)
 
-# Hard delete (actually removes from database)
+# Hard delete (actually DELETE FROM)
 await crud_users.db_delete(db=db, id=user_id)
 
-# Get only non-deleted records
-users = await crud_users.get_multi(db=db, is_deleted=False)
+# Filter to exclude soft-deleted records
+await crud_users.get_multi(db=db, is_deleted=False)
 ```
 
 ## What's Next
 
-Each guide builds on the previous one with practical examples:
-
-1. **[Models](models.md)** - Define your database structure
-2. **[Schemas](schemas.md)** - Add validation and serialization
-3. **[CRUD Operations](crud.md)** - Implement business logic
-4. **[Migrations](migrations.md)** - Deploy changes safely
-
-The boilerplate provides a solid foundation - just follow these patterns to build your data layer!
+1. **[Models](models.md)** - Define your tables and relationships
+2. **[Schemas](schemas.md)** - Add Pydantic validation and serialization
+3. **[CRUD Operations](crud.md)** - Use FastCRUD to read and write data
+4. **[Migrations](migrations.md)** - Track and deploy schema changes

@@ -1,555 +1,348 @@
 # Docker Setup
 
-Learn how to configure and run the FastAPI Boilerplate using Docker Compose. The project includes a complete containerized setup with PostgreSQL, Redis, background workers, and optional services.
+This page walks through running the boilerplate in containers. The Python project lives at `backend/`, so all Docker operations happen from there.
+
+!!! info "docker-compose.yml status"
+    The repository ships a `backend/Dockerfile` (multi-stage). A canonical `backend/docker-compose.yml` is on the way — until then, the **Recommended Compose File** below is what to drop in at `backend/docker-compose.yml` to get the `docker compose up` flow running.
 
 ## Quick Start
 
-The fastest way to get started is with the setup script:
+```bash
+cd backend
+cp .env.example .env
+# edit .env (set SECRET_KEY, change default DB password, etc.)
+docker compose up
+```
+
+## Dockerfile Architecture
+
+`backend/Dockerfile` uses **four stages** built from `python:3.11-slim`:
+
+| Stage | Purpose |
+|-------|---------|
+| `requirements-stage` | Exports pinned requirements from `uv.lock` into `requirements-prod.txt` and `requirements-dev.txt`. Uses the official `astral-sh/uv` image to do this reliably. |
+| `base` | Installs system deps (gcc), production Python deps, and copies `src/` into the image. Sets `PYTHONPATH=/app/src`. |
+| `dev` | Adds dev requirements and `tests/`, runs as a non-root `appuser`, starts with `fastapi dev interfaces/main.py --host 0.0.0.0 --port 8000`. |
+| `migrate` | Adds `migrations/` and `alembic.ini`. Default command is `alembic upgrade head`. Useful as a one-off job before the prod app starts. |
+| `prod` | Same as base, runs as non-root, starts with `fastapi run interfaces/main.py --host 0.0.0.0 --port 8000 --workers $WORKERS` (defaults to 1). |
+
+You select a stage with `--target` when building:
 
 ```bash
-./setup.py
+docker build --target dev -t fastapi-boilerplate:dev backend
+docker build --target prod -t fastapi-boilerplate:prod backend
+docker build --target migrate -t fastapi-boilerplate:migrate backend
 ```
 
-This script helps you choose between three deployment configurations:
+## Recommended Compose File
 
-- **Local development** (`./setup.py local`) - Uvicorn with auto-reload
-- **Staging** (`./setup.py staging`) - Gunicorn with workers  
-- **Production** (`./setup.py production`) - NGINX + Gunicorn
-
-Each option copies the appropriate `Dockerfile`, `docker-compose.yml`, and `.env.example` files from the `scripts/` folder.
-
-## Docker Compose Architecture
-
-The boilerplate includes these core services:
+Save this as `backend/docker-compose.yml`. It brings up Postgres, Redis, and the FastAPI app in dev mode:
 
 ```yaml
 services:
-  web:          # FastAPI application (uvicorn or gunicorn)
-  worker:       # ARQ background task worker  
-  db:           # PostgreSQL 13 database
-  redis:        # Redis Alpine for caching/queues
-  # Optional services (commented out by default):
-  # pgadmin:    # Database administration
-  # nginx:      # Reverse proxy
-  # create_superuser: # One-time superuser creation
-  # create_tier:      # One-time tier creation
-```
-
-## Basic Docker Compose
-
-### Main Configuration
-
-The main `docker-compose.yml` includes:
-
-```yaml
-version: '3.8'
-
-services:
-  web:
+  app:
     build:
       context: .
       dockerfile: Dockerfile
-    # Development mode (reload enabled)
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    # Production mode (uncomment for production)
-    # command: gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
+      target: dev
     env_file:
-      - ./src/.env
+      - .env
     ports:
       - "8000:8000"
+    volumes:
+      - ./src:/app/src       # live code reload
+      - ./tests:/app/src/tests
     depends_on:
       - db
       - redis
-    volumes:
-      - ./src/app:/code/app
-      - ./src/.env:/code/.env
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: arq app.core.worker.settings.WorkerSettings
-    env_file:
-      - ./src/.env
-    depends_on:
-      - db
-      - redis
-    volumes:
-      - ./src/app:/code/app
-      - ./src/.env:/code/.env
 
   db:
-    image: postgres:13
-    env_file:
-      - ./src/.env
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    expose:
-      - "5432"
+    ports:
+      - "5432:5432"
 
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     volumes:
       - redis-data:/data
-    expose:
-      - "6379"
+    ports:
+      - "6379:6379"
 
 volumes:
   postgres-data:
   redis-data:
 ```
 
-### Environment File Loading
+### Matching `.env` for Compose
 
-All services automatically load environment variables from `./src/.env`:
+When the app talks to the other services in the Compose network, it uses **service names** as hostnames:
 
-```yaml
-env_file:
-  - ./src/.env
+```env
+# In backend/.env
+POSTGRES_SERVER=db
+CACHE_REDIS_HOST=redis
+RATE_LIMITER_REDIS_HOST=redis
+TASKIQ_REDIS_HOST=redis
 ```
 
-The Docker services use these environment variables:
+If you also use the host machine to reach Postgres/Redis directly (e.g. for a local dev tool), keep `localhost` working by exposing those ports as the example does (`5432:5432`, `6379:6379`).
 
-- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` for database
-- `REDIS_*_HOST` variables automatically resolve to service names
-- All application settings from your `.env` file
+## Service Reference
 
-## Service Details
+### `app` — FastAPI Application
 
-### Web Service (FastAPI Application)
+Built from the `dev` Dockerfile stage. Runs `fastapi dev`, which auto-reloads on code changes. The volume mount on `./src` makes the reload pick up your edits live.
 
-The web service runs your FastAPI application:
+To switch to production mode, change `target: dev` → `target: prod` and drop the volume mounts.
 
-```yaml
-web:
-  build:
-    context: .
-    dockerfile: Dockerfile
-  # Development: uvicorn with reload
-  command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-  # Production: gunicorn with multiple workers (commented out)
-  # command: gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
-  env_file:
-    - ./src/.env
-  ports:
-    - "8000:8000"  # Direct access in development
-  volumes:
-    - ./src/app:/code/app  # Live code reloading
-    - ./src/.env:/code/.env
-```
+### `db` — PostgreSQL 17
 
-**Key Features:**
+Postgres 17 (alpine for size). Reads `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` from the environment, and persists data in the named volume `postgres-data`.
 
-- **Development mode**: Uses uvicorn with `--reload` for automatic code reloading
-- **Production mode**: Switch to gunicorn with multiple workers (commented out)
-- **Live reloading**: Source code mounted as volume for development
-- **Port exposure**: Direct access on port 8000 (can be disabled for nginx)
+### `redis` — Redis 7
 
-### Worker Service (Background Tasks)
-
-Handles background job processing with ARQ:
-
-```yaml
-worker:
-  build:
-    context: .
-    dockerfile: Dockerfile
-  command: arq app.core.worker.settings.WorkerSettings
-  env_file:
-    - ./src/.env
-  depends_on:
-    - db
-    - redis
-  volumes:
-    - ./src/app:/code/app
-    - ./src/.env:/code/.env
-```
-
-**Features:**
-- Runs ARQ worker for background job processing
-- Shares the same codebase and environment as web service
-- Automatically connects to Redis for job queues
-- Live code reloading in development
-
-### Database Service (PostgreSQL 13)
-
-```yaml
-db:
-  image: postgres:13
-  env_file:
-    - ./src/.env
-  volumes:
-    - postgres-data:/var/lib/postgresql/data
-  expose:
-    - "5432"  # Internal network only
-```
-
-**Configuration:**
-- Uses environment variables: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
-- Data persisted in named volume `postgres-data`
-- Only exposed to internal Docker network (no external port)
-- To enable external access, uncomment the ports section
-
-### Redis Service
-
-```yaml
-redis:
-  image: redis:alpine
-  volumes:
-    - redis-data:/data
-  expose:
-    - "6379"  # Internal network only
-```
-
-**Features:**
-- Lightweight Alpine Linux image
-- Data persistence with named volume
-- Used for caching, job queues, and rate limiting
-- Internal network access only
+Used for cache (`CACHE_REDIS_DB=0`), rate limiting (`RATE_LIMITER_REDIS_DB=1`), sessions, and the Taskiq broker (`TASKIQ_REDIS_DB=3`). The boilerplate uses different DB numbers so they don't interfere.
 
 ## Optional Services
 
-### Database Administration (pgAdmin)
+Add these to your `docker-compose.yml` as needed.
 
-Uncomment to enable web-based database management:
+### Taskiq Worker
 
-```yaml
-pgadmin:
-  container_name: pgadmin4
-  image: dpage/pgadmin4:latest
-  restart: always
-  ports:
-    - "5050:80"
-  volumes:
-    - pgadmin-data:/var/lib/pgadmin
-  env_file:
-    - ./src/.env
-  depends_on:
-    - db
-```
-
-**Usage:**
-- Access at `http://localhost:5050`
-- Requires `PGADMIN_DEFAULT_EMAIL` and `PGADMIN_DEFAULT_PASSWORD` in `.env`
-- Connect to database using service name `db` and port `5432`
-
-### Reverse Proxy (Nginx)
-
-Uncomment for production-style reverse proxy:
+To process background tasks, add a worker service:
 
 ```yaml
-nginx:
-  image: nginx:latest
-  ports:
-    - "80:80"
-  volumes:
-    - ./default.conf:/etc/nginx/conf.d/default.conf
-  depends_on:
-    - web
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    env_file:
+      - .env
+    command: taskiq worker infrastructure.taskiq.worker:default_broker
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      - db
+      - redis
 ```
 
-**Configuration:**
-The included `default.conf` provides:
+Scale workers with `docker compose up --scale worker=3`.
 
-```nginx
-server {
-    listen 80;
-    
-    location / {
-        proxy_pass http://web:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
+### Migrations Job
 
-**When using nginx:**
-
-1. Uncomment the nginx service
-2. Comment out the `ports` section in the web service
-3. Uncomment `expose: ["8000"]` in the web service
-
-### Initialization Services
-
-#### Create First Superuser
+Run Alembic migrations before the app starts:
 
 ```yaml
-create_superuser:
-  build:
-    context: .
-    dockerfile: Dockerfile
-  env_file:
-    - ./src/.env
-  depends_on:
-    - db
-    - web
-  command: python -m src.scripts.create_first_superuser
-  volumes:
-    - ./src:/code/src
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: migrate
+    env_file:
+      - .env
+    depends_on:
+      - db
 ```
-
-#### Create First Tier
-
-```yaml
-create_tier:
-  build:
-    context: .
-    dockerfile: Dockerfile
-  env_file:
-    - ./src/.env
-  depends_on:
-    - db
-    - web
-  command: python -m src.scripts.create_first_tier
-  volumes:
-    - ./src:/code/src
-```
-
-**Usage:**
-
-- These are one-time setup services
-- Uncomment when you need to initialize data
-- Run once, then comment out again
-
-## Dockerfile Details
-
-The project uses a multi-stage Dockerfile with `uv` for fast Python package management:
-
-### Builder Stage
-
-```dockerfile
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
-
-ENV UV_COMPILE_BYTECODE=1
-ENV UV_LINK_MODE=copy
-
-WORKDIR /app
-
-# Install dependencies (cached layer)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --locked --no-install-project
-
-# Copy and install project
-COPY . /app
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-editable
-```
-
-### Final Stage
-
-```dockerfile
-FROM python:3.11-slim-bookworm
-
-# Create non-root user for security
-RUN groupadd --gid 1000 app \
-    && useradd --uid 1000 --gid app --shell /bin/bash --create-home app
-
-# Copy virtual environment from builder
-COPY --from=builder --chown=app:app /app/.venv /app/.venv
-
-ENV PATH="/app/.venv/bin:$PATH"
-USER app
-WORKDIR /code
-
-# Default command (can be overridden)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
-```
-
-**Security Features:**
-
-- Non-root user execution
-- Multi-stage build for smaller final image
-- Cached dependency installation
-
-## Common Docker Commands
-
-### Development Workflow
 
 ```bash
-# Start all services
+docker compose run --rm migrate
+```
+
+### Initial Setup Job
+
+Create the first admin user and default tier on a fresh DB:
+
+```yaml
+  setup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    env_file:
+      - .env
+    command: python -m scripts.setup_initial_data
+    depends_on:
+      - db
+```
+
+```bash
+docker compose run --rm setup
+```
+
+### pgAdmin
+
+If you want a web UI for the database, add:
+
+```yaml
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+```
+
+Visit <http://localhost:5050>, log in, and add a server with hostname `db`, port `5432`, user `postgres` (or whatever you set in `.env`).
+
+### Memcached (alternative cache backend)
+
+If you prefer Memcached over Redis:
+
+```yaml
+  memcached:
+    image: memcached:1.6-alpine
+    ports:
+      - "11211:11211"
+```
+
+And in `.env`:
+
+```env
+CACHE_BACKEND=memcached
+RATE_LIMITER_BACKEND=memcached
+CACHE_MEMCACHED_HOST=memcached
+RATE_LIMITER_MEMCACHED_HOST=memcached
+```
+
+### RabbitMQ (alternative Taskiq broker)
+
+```yaml
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${TASKIQ_RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${TASKIQ_RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # management UI
+```
+
+In `.env`:
+
+```env
+TASKIQ_BROKER_TYPE=rabbitmq
+TASKIQ_RABBITMQ_HOST=rabbitmq
+```
+
+## Common Commands
+
+```bash
+cd backend
+
+# Bring everything up (foreground, attached logs)
 docker compose up
 
-# Start in background
+# Detached
 docker compose up -d
 
-# Rebuild and start (after code changes)
+# Rebuild after dependency changes
 docker compose up --build
 
-# View logs
-docker compose logs -f web
-docker compose logs -f worker
+# Logs for a specific service
+docker compose logs -f app
 
-# Stop services
-docker compose down
+# Open a shell inside the app container
+docker compose exec app bash
 
-# Stop and remove volumes (reset data)
-docker compose down -v
-```
-
-### Service Management
-
-```bash
-# Start specific services
-docker compose up web db redis
-
-# Scale workers
-docker compose up --scale worker=3
-
-# Execute commands in running containers
-docker compose exec web bash
+# Run a one-off command
+docker compose exec app uv run alembic upgrade head
 docker compose exec db psql -U postgres
 docker compose exec redis redis-cli
 
-# View service status
-docker compose ps
+# Stop everything
+docker compose down
+
+# Stop and wipe volumes (⚠️ deletes data)
+docker compose down -v
 ```
 
-### Production Mode
+## Production-Style Setup
 
-To switch to production mode:
+For a more production-like local stack:
 
-1. **Enable Gunicorn:**
-   ```yaml
-   # Comment out uvicorn line
-   # command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-   # Uncomment gunicorn line
-   command: gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000
-   ```
-
-2. **Enable Nginx** (optional):
-   ```yaml
-   # Uncomment nginx service
-   nginx:
-     image: nginx:latest
-     ports:
-       - "80:80"
-   
-   # In web service, comment out ports and uncomment expose
-   # ports:
-   #   - "8000:8000"
-   expose:
-     - "8000"
-   ```
-
-3. **Remove development volumes:**
-   ```yaml
-   # Remove or comment out for production
-   # volumes:
-   #   - ./src/app:/code/app
-   #   - ./src/.env:/code/.env
-   ```
-
-## Environment Configuration
-
-### Service Communication
-
-Services communicate using service names:
-
-```yaml
-# In your .env file for Docker
-POSTGRES_SERVER=db      # Not localhost
-REDIS_CACHE_HOST=redis  # Not localhost
-REDIS_QUEUE_HOST=redis
-REDIS_RATE_LIMIT_HOST=redis
-```
-
-### Port Management
-
-**Development (default):**
-- Web: `localhost:8000` (direct access)
-- Database: `localhost:5432` (uncomment ports to enable)
-- Redis: `localhost:6379` (uncomment ports to enable)
-- pgAdmin: `localhost:5050` (if enabled)
-
-**Production with Nginx:**
-- Web: `localhost:80` (through nginx)
-- Database: Internal only
-- Redis: Internal only
+1. **Use the `prod` stage**: change `target: dev` to `target: prod` in the `app` service.
+2. **Drop dev volume mounts**: remove `./src:/app/src` so the image is the source of truth.
+3. **Run migrations as a separate job** (the `migrate` service above) before the app starts.
+4. **Bump worker count**: set `WORKERS=4` in `.env` (the `prod` command reads it).
+5. **Add a reverse proxy** if you need TLS — Caddy or Traefik are simpler to configure than nginx for single-host setups.
 
 ## Troubleshooting
 
-### Common Issues
+### Container won't start
 
-**Container won't start:**
 ```bash
-# Check logs
-docker compose logs web
-
-# Rebuild image
-docker compose build --no-cache web
-
-# Check environment file
-docker compose exec web env | grep POSTGRES
+docker compose logs app
+docker compose build --no-cache app
 ```
 
-**Database connection issues:**
+### Database connection refused
+
 ```bash
-# Check if db service is running
+# Is the db service up?
 docker compose ps db
 
-# Test connection from web container
-docker compose exec web ping db
+# Can the app container resolve "db"?
+docker compose exec app python -c "import socket; print(socket.gethostbyname('db'))"
 
-# Check database logs
+# Inspect db logs
 docker compose logs db
 ```
 
-**Port conflicts:**
-```bash
-# Check what's using the port
-lsof -i :8000
+### Code changes not picking up
 
-# Use different ports
+Make sure you have the `./src:/app/src` volume mount in the `app` service, and that `target: dev` is set (the `dev` stage uses `fastapi dev` which has reload enabled). The `prod` stage does **not** auto-reload.
+
+### Port already in use
+
+```bash
+lsof -i :8000
+# or change the host-side port in compose:
 ports:
-  - "8001:8000"  # Use port 8001 instead
+  - "8080:8000"
 ```
 
-### Development vs Production
+### Resetting everything
 
-**Development features:**
-
-- Live code reloading with volume mounts
-- Direct port access
-- uvicorn with `--reload`
-- Exposed database/redis ports for debugging
-
-**Production optimizations:**
-
-- No volume mounts (code baked into image)
-- Nginx reverse proxy
-- Gunicorn with multiple workers
-- Internal service networking only
-- Resource limits and health checks
+```bash
+cd backend
+docker compose down -v        # wipes volumes
+docker compose build --no-cache
+docker compose up
+```
 
 ## Best Practices
 
 ### Development
-- Use volume mounts for live code reloading
-- Enable direct port access for debugging
-- Use uvicorn with reload for fast development
-- Enable optional services (pgAdmin) as needed
+- Use `target: dev` for live reload
+- Mount `./src` as a volume so edits don't require rebuilds
+- Expose Postgres/Redis ports for easy local debugging
+- Keep `.env` out of version control (it's already in `.gitignore`)
 
 ### Production
-- Switch to gunicorn with multiple workers
-- Use nginx for reverse proxy and load balancing
-- Remove volume mounts and bake code into images
-- Use internal networking only
-- Set resource limits and health checks
+- Use `target: prod` and remove dev volume mounts
+- Run the `migrate` stage as a separate job before launching the app
+- Set `ENVIRONMENT=production` to enable the security validator
+- Run as the non-root `appuser` (already set up in the Dockerfile)
+- Pin image tags (`postgres:17-alpine`, not `postgres:latest`)
 
 ### Security
-- Containers run as non-root user
-- Use internal networking for service communication
-- Don't expose database/redis ports externally
-- Use Docker secrets for sensitive data in production
+- Containers run as non-root in dev/prod stages
+- Don't expose the Postgres/Redis ports to public networks in production
+- Set strong `POSTGRES_PASSWORD`, Redis passwords (`CACHE_REDIS_PASSWORD`, etc.) and `SECRET_KEY` before deploying
 
-### Monitoring
-- Use `docker compose logs` to monitor services
-- Set up health checks for all services
-- Monitor resource usage with `docker stats`
-- Use structured logging for better observability
+## See Also
 
-The Docker setup provides everything you need for both development and production. Start with the default configuration and customize as your needs grow! 
+- **[Environment Variables](environment-variables.md)** — Full env var reference
+- **[Settings Classes](settings-classes.md)** — How env vars become Python settings
+- **[Production](../production.md)** — Production deployment guide

@@ -1,378 +1,187 @@
-# Configuration
+# Admin Panel Configuration
 
-Learn how to configure the admin panel (powered by [CRUDAdmin](https://github.com/benavlabs/crudadmin)) using the FastAPI boilerplate's built-in environment variable system. The admin panel is fully integrated with your application's configuration and requires no additional setup files or complex initialization.
+The admin panel has a deliberately small surface area: it's a [SQLAdmin](https://aminalaee.dev/sqladmin/) instance gated by a username/password from environment variables. Configuration boils down to a handful of `.env` values.
 
-> **About CRUDAdmin**: For complete configuration options and advanced features, see the [CRUDAdmin documentation](https://benavlabs.github.io/crudadmin/).
+## Environment Variables
 
-## Environment-Based Configuration
+```env
+# Toggle the admin panel (default: true)
+ADMIN_ENABLED=true
 
-The FastAPI boilerplate handles all admin panel configuration through environment variables defined in your `.env` file. This approach provides consistent configuration across development, staging, and production environments.
+# Admin login credentials
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your-secure-password
 
-```bash
-# Basic admin panel configuration in .env
-CRUD_ADMIN_ENABLED=true
-ADMIN_USERNAME="admin"
-ADMIN_PASSWORD="SecurePassword123!"
-CRUD_ADMIN_MOUNT_PATH="/admin"
+# Used for admin session encryption (same SECRET_KEY as the rest of the app)
+SECRET_KEY=<openssl rand -hex 32>
 ```
 
-The configuration system automatically:
+That's the whole admin-specific config. Everything else (engine, models, mount path) is hardcoded in `src/interfaces/admin/initialize.py` for simplicity.
 
-- Validates all environment variables at startup
-- Provides sensible defaults for optional settings
-- Adapts security settings based on your environment (local/staging/production)
-- Integrates with your application's existing security and database systems
+### Backing Settings Classes
 
-## Core Configuration Settings
+The variables map to two settings classes in `src/infrastructure/config/settings.py`:
 
-### Enable/Disable Admin Panel
+- **`AdminSettings`** — `ADMIN_NAME`, `ADMIN_EMAIL`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `DEFAULT_TIER_NAME`. Used by both the admin panel login *and* `scripts/setup_initial_data.py` to bootstrap the first superuser.
+- **`SQLAdminSettings`** — `ADMIN_ENABLED`. Single toggle for the admin panel.
 
-Control whether the admin panel is available:
+## What Happens at Startup
 
-```bash
-# Enable admin panel (default: true)
-CRUD_ADMIN_ENABLED=true
+1. `infrastructure/main.py` calls `create_admin_interface(app)` from `interfaces/admin/initialize.py`
+2. If `ADMIN_ENABLED=false`, the function returns `None` and the admin panel is **not mounted**
+3. Otherwise, an `AdminAuth` backend is constructed using `SECRET_KEY`
+4. A SQLAdmin `Admin` instance is created against the app's existing database `engine`
+5. `register_admin_views(admin)` adds `UserAdmin` and `TierAdmin` (from `views/`)
+6. The admin app is mounted at `/admin`
 
-# Disable admin panel completely
-CRUD_ADMIN_ENABLED=false
-```
+## Login Authentication
 
-When disabled, the admin interface is not mounted and consumes no resources.
-
-### Admin Access Credentials
-
-Configure the initial admin user that's created automatically:
-
-```bash
-# Required: Admin user credentials
-ADMIN_USERNAME="your-admin-username"        # Admin login username
-ADMIN_PASSWORD="YourSecurePassword123!"     # Admin login password
-
-# Optional: Additional admin user details (uses existing settings)
-ADMIN_NAME="Administrator"                  # Display name (from FirstUserSettings)
-ADMIN_EMAIL="admin@yourcompany.com"         # Admin email (from FirstUserSettings)
-```
-
-**How this works:**
-
-- The admin user is created automatically when the application starts
-- Only created if no admin users exist (safe for restarts)
-- Uses your application's existing password hashing system
-- Credentials are validated according to CRUDAdmin requirements
-
-### Interface Configuration
-
-Customize where and how the admin panel appears:
-
-```bash
-# Admin panel URL path (default: "/admin")
-CRUD_ADMIN_MOUNT_PATH="/admin"              # Access at http://localhost:8000/admin
-CRUD_ADMIN_MOUNT_PATH="/management"         # Access at http://localhost:8000/management
-CRUD_ADMIN_MOUNT_PATH="/internal"           # Access at http://localhost:8000/internal
-```
-
-The admin panel is mounted as a sub-application at your specified path.
-
-## Session Management Configuration
-
-Control how admin users stay logged in and how sessions are managed.
-
-### Basic Session Settings
-
-```bash
-# Session limits and timeouts
-CRUD_ADMIN_MAX_SESSIONS=10                  # Max concurrent sessions per user
-CRUD_ADMIN_SESSION_TIMEOUT=1440             # Session timeout in minutes (24 hours)
-
-# Cookie security
-SESSION_SECURE_COOKIES=true                 # Require HTTPS for cookies (production)
-```
-
-**Session behavior:**
-
-- Each admin login creates a new session
-- Sessions expire after the timeout period of inactivity
-- When max sessions are exceeded, oldest sessions are removed
-- Session cookies are HTTP-only and secure (when HTTPS is enabled)
-
-### Memory Sessions (Development)
-
-For local development, sessions are stored in memory by default:
-
-```bash
-# Development configuration
-ENVIRONMENT="local"                         # Enables memory sessions
-CRUD_ADMIN_REDIS_ENABLED=false             # Explicitly disable Redis (default)
-```
-
-**Memory session characteristics:**
-
-- Fast performance with no external dependencies
-- Sessions lost when application restarts
-- Suitable for single-developer environments
-- Not suitable for load-balanced deployments
-
-### Redis Sessions (Production)
-
-For production deployments, enable Redis session storage:
-
-```bash
-# Enable Redis sessions
-CRUD_ADMIN_REDIS_ENABLED=true
-
-# Redis connection settings
-CRUD_ADMIN_REDIS_HOST="localhost"          # Redis server hostname
-CRUD_ADMIN_REDIS_PORT=6379                 # Redis server port
-CRUD_ADMIN_REDIS_DB=0                      # Redis database number
-CRUD_ADMIN_REDIS_PASSWORD="secure-pass"    # Redis authentication
-CRUD_ADMIN_REDIS_SSL=false                 # Enable SSL/TLS connection
-```
-
-**Redis session benefits:**
-
-- Sessions persist across application restarts
-- Supports multiple application instances (load balancing)
-- Configurable expiration and cleanup
-- Production-ready scalability
-
-**Redis URL construction:**
-
-The boilerplate automatically constructs the Redis URL from your environment variables:
+Login flow (in `interfaces/admin/auth.py`):
 
 ```python
-# Automatic URL generation in src/app/admin/initialize.py
-redis_url = f"redis{'s' if settings.CRUD_ADMIN_REDIS_SSL else ''}://"
-if settings.CRUD_ADMIN_REDIS_PASSWORD:
-    redis_url += f":{settings.CRUD_ADMIN_REDIS_PASSWORD}@"
-redis_url += f"{settings.CRUD_ADMIN_REDIS_HOST}:{settings.CRUD_ADMIN_REDIS_PORT}/{settings.CRUD_ADMIN_REDIS_DB}"
+class AdminAuth(AuthenticationBackend):
+    async def login(self, request: Request) -> bool:
+        form = await request.form()
+        username = form.get("username")
+        password = form.get("password")
+
+        settings = get_settings()
+        if username == settings.ADMIN_USERNAME and password == settings.ADMIN_PASSWORD:
+            request.session.update({"admin_authenticated": True})
+            return True
+        return False
 ```
 
-## Security Configuration
+Notes:
 
-The admin panel automatically adapts its security settings based on your deployment environment.
+- Credentials come from environment variables, **not the database**. Restart the app to change them.
+- Only one admin login is supported. There's no multi-admin user table.
+- The session is encrypted with `SECRET_KEY` via Starlette's `SessionMiddleware`.
+- Logout clears the session: `request.session.clear()`.
 
-### Environment-Based Security
+If you need multiple admin operators, see [User Management](user-management.md) for ways to extend this.
 
-```bash
-# Environment setting affects security behavior
-ENVIRONMENT="local"                         # Development mode
-ENVIRONMENT="staging"                       # Staging mode  
-ENVIRONMENT="production"                    # Production mode with enhanced security
-```
+## Mount Path
 
-**Security changes by environment:**
-
-| Setting | Local | Staging | Production |
-|---------|-------|---------|------------|
-| **HTTPS Enforcement** | Disabled | Optional | Enabled |
-| **Secure Cookies** | Optional | Recommended | Required |
-| **Session Tracking** | Optional | Recommended | Enabled |
-| **Event Logging** | Optional | Recommended | Enabled |
-
-### Audit and Tracking
-
-Enable comprehensive logging for compliance and security monitoring:
-
-```bash
-# Event and session tracking
-CRUD_ADMIN_TRACK_EVENTS=true               # Log all admin actions
-CRUD_ADMIN_TRACK_SESSIONS=true             # Track session lifecycle
-
-# Available in admin interface
-# - View all admin actions with timestamps
-# - Monitor active sessions
-# - Track user activity patterns
-```
-
-### Access Restrictions
-
-The boilerplate supports IP and network-based access restrictions (configured in code):
+The admin panel is hardcoded at `/admin` (defined when `Admin(...)` is instantiated). To change the path, edit `src/interfaces/admin/initialize.py`:
 
 ```python
-# In src/app/admin/initialize.py - customize as needed
-admin = CRUDAdmin(
-    # ... other settings ...
-    allowed_ips=settings.CRUD_ADMIN_ALLOWED_IPS_LIST,      # Specific IP addresses
-    allowed_networks=settings.CRUD_ADMIN_ALLOWED_NETWORKS_LIST,  # CIDR network ranges
+admin = Admin(
+    app=app,
+    engine=engine,
+    authentication_backend=authentication_backend,
+    title="Admin",
+    base_url="/management",   # add this to change the mount path
 )
 ```
 
-To implement IP restrictions, extend the `CRUDAdminSettings` class in `src/app/core/config.py`.
+If you change it, also update any internal links in your frontend or operational docs.
 
-## Integration with Application Settings
+## Database Connection
 
-The admin panel leverages your existing application configuration for seamless integration.
+SQLAdmin reuses the **same SQLAlchemy engine** the rest of the app uses (imported from `infrastructure/database/session.py`). There's no separate admin database connection or pool to configure.
 
-### Shared Security Settings
+## Session Cookies
 
-```bash
-# Uses your application's main secret key
-SECRET_KEY="your-application-secret-key"    # Shared with admin panel
-
-# Inherits database settings
-POSTGRES_USER="dbuser"                      # Admin uses same database
-POSTGRES_PASSWORD="dbpass"
-POSTGRES_SERVER="localhost"
-POSTGRES_DB="yourapp"
-```
-
-### Automatic Configuration Loading
-
-The admin panel automatically inherits settings from your application:
+The admin login uses Starlette's `SessionMiddleware`, which is added to the FastAPI app in `src/interfaces/main.py`:
 
 ```python
-# In src/app/admin/initialize.py
-admin = CRUDAdmin(
-    session=async_get_db,                   # Your app's database session
-    SECRET_KEY=settings.SECRET_KEY.get_secret_value(),  # Your app's secret key
-    enforce_https=settings.ENVIRONMENT == EnvironmentOption.PRODUCTION,
-    # ... other settings from your app configuration
+app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
+```
+
+Cookie behavior:
+
+- HTTP-only by default
+- Encrypted/signed with `SECRET_KEY`
+- Same-site `lax`
+- **Not** marked `Secure` automatically — if you serve the app over HTTPS, set `SESSION_SECURE_COOKIES=true` and adjust the middleware as needed (the Starlette `SessionMiddleware` doesn't have a built-in production-secure flag the way our session backend does)
+
+For production behind HTTPS, you'll typically want to:
+
+1. Terminate TLS at the proxy / load balancer
+2. Strip `/admin` from public-facing routing entirely (see [Production Hardening](#production-hardening) below)
+
+## Development vs Production
+
+### Development
+
+The default `.env.example` is already development-ready:
+
+```env
+ENVIRONMENT=development
+ADMIN_ENABLED=true
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your-secure-password
+SECRET_KEY=insecure-secret-key-change-this-in-production
+```
+
+Open <http://localhost:8000/admin>, log in, and you have access to Users and Tiers.
+
+### Production Hardening
+
+Three options, ordered by aggressiveness:
+
+1. **Disable entirely**
+    ```env
+    ADMIN_ENABLED=false
+    ```
+    Simplest. The admin panel never mounts. Run admin tasks via scripts (`uv run python -m scripts.setup_initial_data`, custom one-offs) or temporary overrides.
+
+2. **Restrict at the proxy/load balancer**
+    Keep `ADMIN_ENABLED=true` but only allow the `/admin` path from your VPN's CIDR range or a specific IP allowlist. The app stays the same; the network blocks public access.
+
+3. **Use a strong unique password**
+    If you can't restrict at the network layer, treat `ADMIN_PASSWORD` like a production secret:
+    - Pull from a secrets manager at deploy time, never commit
+    - Rotate periodically
+    - Use a long, high-entropy password (the production security validator will refuse to start the app if `SECRET_KEY` is the placeholder, but it doesn't validate `ADMIN_PASSWORD`)
+
+The Production Security Validator (`infrastructure/security/`) checks several things at startup when `ENVIRONMENT=production`, but admin credentials aren't currently in the validation list. Be deliberate about what you set.
+
+## Environment Detection
+
+The admin panel itself doesn't change behavior between `local` / `development` / `staging` / `production` — it's the same SQLAdmin app. What changes is the surrounding environment:
+
+- **Cookie security**: derived from your reverse proxy / TLS setup, not from the `ENVIRONMENT` setting
+- **Logging**: admin actions go through the same logger configured by `infrastructure/logging/`
+- **Session backend**: Starlette's `SessionMiddleware` is in-memory + cookie-based, not the same as the API's `SESSION_BACKEND` (Redis/memcached/memory). Restart-resilience for the *admin* login isn't relevant — admins re-log-in fine.
+
+## Troubleshooting
+
+### `/admin` returns 404
+Check `ADMIN_ENABLED`. If it's `false` (or unset and Pydantic resolves to a falsy value), the admin app isn't mounted. Verify with:
+
+```bash
+cd backend
+uv run python -c "from src.infrastructure.config.settings import get_settings; print(get_settings().ADMIN_ENABLED)"
+```
+
+### Login form keeps rejecting credentials
+- Confirm `ADMIN_USERNAME` and `ADMIN_PASSWORD` in `backend/.env` match what you're typing
+- Restart the app after changing env vars (settings are read at startup)
+- If running in Docker, confirm the env vars are actually reaching the container (`docker compose exec app env | grep ADMIN_`)
+
+### Admin session keeps logging out
+The Starlette `SessionMiddleware` cookie's lifetime is controlled by the browser (it's a session cookie). For longer-lived admin sessions, edit the middleware setup in `src/interfaces/main.py` to pass `max_age=...`:
+
+```python
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.SECRET_KEY,
+    max_age=60 * 60 * 8,  # 8 hours
 )
 ```
 
-## Deployment Examples
-
-### Development Environment
-
-Perfect for local development with minimal setup:
+### Wrong `engine` connection / "no such table"
+The admin uses the same engine as the API, which means it requires `CREATE_TABLES_ON_STARTUP=true` (default) or applied Alembic migrations. If `/admin` shows views but they're empty / error, check:
 
 ```bash
-# .env.development
-ENVIRONMENT="local"
-CRUD_ADMIN_ENABLED=true
-ADMIN_USERNAME="dev-admin"
-ADMIN_PASSWORD="dev123"
-CRUD_ADMIN_MOUNT_PATH="/admin"
-
-# Memory sessions - no external dependencies
-CRUD_ADMIN_REDIS_ENABLED=false
-
-# Optional tracking for testing
-CRUD_ADMIN_TRACK_EVENTS=false
-CRUD_ADMIN_TRACK_SESSIONS=false
+cd backend
+uv run alembic current
 ```
 
-### Staging Environment
+## Next Steps
 
-Staging environment with Redis but relaxed security:
-
-```bash
-# .env.staging
-ENVIRONMENT="staging"
-CRUD_ADMIN_ENABLED=true
-ADMIN_USERNAME="staging-admin"
-ADMIN_PASSWORD="StagingPassword123!"
-
-# Redis sessions for testing production behavior
-CRUD_ADMIN_REDIS_ENABLED=true
-CRUD_ADMIN_REDIS_HOST="staging-redis.example.com"
-CRUD_ADMIN_REDIS_PASSWORD="staging-redis-pass"
-
-# Enable tracking for testing
-CRUD_ADMIN_TRACK_EVENTS=true
-CRUD_ADMIN_TRACK_SESSIONS=true
-SESSION_SECURE_COOKIES=true
-```
-
-### Production Environment
-
-Production-ready configuration with full security:
-
-```bash
-# .env.production
-ENVIRONMENT="production"
-CRUD_ADMIN_ENABLED=true
-ADMIN_USERNAME="prod-admin"
-ADMIN_PASSWORD="VerySecureProductionPassword123!"
-
-# Redis sessions for scalability
-CRUD_ADMIN_REDIS_ENABLED=true
-CRUD_ADMIN_REDIS_HOST="redis.internal.company.com"
-CRUD_ADMIN_REDIS_PORT=6379
-CRUD_ADMIN_REDIS_PASSWORD="ultra-secure-redis-password"
-CRUD_ADMIN_REDIS_SSL=true
-
-# Full security and tracking
-SESSION_SECURE_COOKIES=true
-CRUD_ADMIN_TRACK_EVENTS=true
-CRUD_ADMIN_TRACK_SESSIONS=true
-CRUD_ADMIN_MAX_SESSIONS=5
-CRUD_ADMIN_SESSION_TIMEOUT=480              # 8 hours for security
-```
-
-### Docker Deployment
-
-Configure for containerized deployments:
-
-```yaml
-# docker-compose.yml
-version: '3.8'
-services:
-  web:
-    build: .
-    environment:
-      - ENVIRONMENT=production
-      - ADMIN_USERNAME=${ADMIN_USERNAME}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
-      
-      # Redis connection
-      - CRUD_ADMIN_REDIS_ENABLED=true
-      - CRUD_ADMIN_REDIS_HOST=redis
-      - CRUD_ADMIN_REDIS_PORT=6379
-      - CRUD_ADMIN_REDIS_PASSWORD=${REDIS_PASSWORD}
-      
-    depends_on:
-      - redis
-      - postgres
-
-  redis:
-    image: redis:7-alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD}
-    volumes:
-      - redis_data:/data
-```
-
-```bash
-# .env file for Docker
-ADMIN_USERNAME="docker-admin"
-ADMIN_PASSWORD="DockerSecurePassword123!"
-REDIS_PASSWORD="docker-redis-password"
-```
-
-## Configuration Validation
-
-The boilerplate automatically validates your configuration at startup and provides helpful error messages.
-
-### Common Configuration Issues
-
-**Missing Required Variables:**
-```bash
-# Error: Admin credentials not provided
-# Solution: Add to .env
-ADMIN_USERNAME="your-admin"
-ADMIN_PASSWORD="your-password"
-```
-
-**Invalid Redis Configuration:**
-```bash
-# Error: Redis connection failed
-# Check Redis server and credentials
-CRUD_ADMIN_REDIS_HOST="correct-redis-host"
-CRUD_ADMIN_REDIS_PASSWORD="correct-password"
-```
-
-**Security Warnings:**
-```bash
-# Warning: Weak admin password
-# Use stronger password with mixed case, numbers, symbols
-ADMIN_PASSWORD="StrongerPassword123!"
-```
-
-## What's Next
-
-With your admin panel configured, you're ready to:
-
-1. **[Adding Models](adding-models.md)** - Register your application models with the admin interface
-2. **[User Management](user-management.md)** - Manage admin users and implement security best practices
-
-The configuration system provides flexibility for any deployment scenario while maintaining consistency across environments. 
+- **[Adding Models](adding-models.md)** — Register your own models with the admin
+- **[User Management](user-management.md)** — Extending admin authentication
+- **[Production](../production.md)** — Production hardening checklist

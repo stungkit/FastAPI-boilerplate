@@ -1,668 +1,347 @@
-# Configuration Guide
+# Environment Variables Reference
 
-This guide covers all configuration options available in the FastAPI Boilerplate, including environment variables, settings classes, and advanced deployment configurations.
+This page is the complete reference for every environment variable the boilerplate reads. The source of truth is `backend/.env.example` — this page mirrors it with descriptions.
 
-## Configuration Overview
+All variables are loaded from `backend/.env` at application startup via Pydantic `BaseSettings` classes in `src/infrastructure/config/settings.py`.
 
-The boilerplate uses a layered configuration approach:
-
-- **Environment Variables** (`.env` file) - Primary configuration method
-- **Settings Classes** (`src/app/core/config.py`) - Python-based configuration
-- **Docker Configuration** (`docker-compose.yml`) - Container orchestration
-- **Database Configuration** (`alembic.ini`) - Database migrations
-
-## Environment Variables Reference
-
-All configuration is managed through environment variables defined in the `.env` file located in the `src/` directory.
-
-### Application Settings
-
-Basic application metadata displayed in API documentation:
+## Environment
 
 ```env
-# ------------- app settings -------------
-APP_NAME="Your App Name"
-APP_DESCRIPTION="Your app description here"
-APP_VERSION="0.1.0"
-CONTACT_NAME="Your Name"
-CONTACT_EMAIL="your.email@example.com"
-LICENSE_NAME="MIT"
+# Options: development, staging, production, local
+ENVIRONMENT=development
 ```
 
-**Variables Explained:**
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ENVIRONMENT` | `development` | Drives logging style, docs visibility, and security validation. See [Environment-Specific](environment-specific.md). |
 
-- `APP_NAME`: Displayed in API documentation and responses
-- `APP_DESCRIPTION`: Shown in OpenAPI documentation
-- `APP_VERSION`: API version for documentation and headers
-- `CONTACT_NAME`: Contact information for API documentation
-- `CONTACT_EMAIL`: Support email for API users
-- `LICENSE_NAME`: License type for the API
-
-### Database Configuration
-
-PostgreSQL database connection settings:
+## Database
 
 ```env
-# ------------- database -------------
-POSTGRES_USER="your_postgres_user"
-POSTGRES_PASSWORD="your_secure_password"
-POSTGRES_SERVER="localhost"
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=postgres
+POSTGRES_SERVER=db          # use "localhost" without Docker
 POSTGRES_PORT=5432
-POSTGRES_DB="your_database_name"
+POSTGRES_SYNC_PREFIX=postgresql://
+POSTGRES_ASYNC_PREFIX=postgresql+asyncpg://
+CREATE_TABLES_ON_STARTUP=true
 ```
 
-**Variables Explained:**
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `POSTGRES_USER` | `postgres` | Database user |
+| `POSTGRES_PASSWORD` | `postgres` | Database password |
+| `POSTGRES_DB` | `postgres` | Database name |
+| `POSTGRES_SERVER` | `localhost` | Hostname (use `db` for Compose) |
+| `POSTGRES_PORT` | `5432` | TCP port |
+| `POSTGRES_SYNC_PREFIX` | `postgresql://` | Driver prefix for sync code (Alembic) |
+| `POSTGRES_ASYNC_PREFIX` | `postgresql+asyncpg://` | Driver prefix for async code (the app) |
+| `CREATE_TABLES_ON_STARTUP` | `true` | Auto-create tables from models on startup |
+| `POSTGRES_POOL_SIZE` | `20` | SQLAlchemy connection pool size |
+| `POSTGRES_MAX_OVERFLOW` | `0` | Pool overflow connections |
 
-- `POSTGRES_USER`: Database user with appropriate permissions
-- `POSTGRES_PASSWORD`: Strong password for database access
-- `POSTGRES_SERVER`: Hostname or IP of PostgreSQL server
-- `POSTGRES_PORT`: PostgreSQL port (default: 5432)
-- `POSTGRES_DB`: Name of the database to connect to
+If you set `DATABASE_URL` directly, it overrides the constructed URL.
 
-**Environment-Specific Values:**
+## Cache
 
 ```env
-# Local development
-POSTGRES_SERVER="localhost"
+CACHE_ENABLED=true
+CACHE_BACKEND=redis           # or "memcached"
+DEFAULT_CACHE_EXPIRATION=3600
 
-# Docker Compose
-POSTGRES_SERVER="db"
-
-# Production
-POSTGRES_SERVER="your-prod-db-host.com"
+# Client-side cache (Cache-Control headers)
+CLIENT_CACHE_ENABLED=true
+CLIENT_CACHE_MAX_AGE=60
 ```
 
-### Security & Authentication
-
-JWT and password security configuration:
+### Redis backend
 
 ```env
-# ------------- crypt -------------
-SECRET_KEY="your-super-secret-key-here"
-ALGORITHM="HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-REFRESH_TOKEN_EXPIRE_DAYS=7
+CACHE_REDIS_HOST=redis        # use "localhost" without Docker
+CACHE_REDIS_PORT=6379
+CACHE_REDIS_DB=0
+CACHE_REDIS_PASSWORD=
+CACHE_REDIS_CONNECT_TIMEOUT=5
+CACHE_REDIS_POOL_SIZE=10
 ```
 
-**Variables Explained:**
-
-- `SECRET_KEY`: Used for JWT token signing (generate with `openssl rand -hex 32`)
-- `ALGORITHM`: JWT signing algorithm (HS256 recommended)
-- `ACCESS_TOKEN_EXPIRE_MINUTES`: How long access tokens remain valid
-- `REFRESH_TOKEN_EXPIRE_DAYS`: How long refresh tokens remain valid
-
-!!! danger "Security Warning"
-Never use default values in production. Generate a strong secret key:
-`bash     openssl rand -hex 32     `
-
-### Redis Configuration
-
-Redis is used for caching, job queues, and rate limiting:
+### Memcached backend
 
 ```env
-# ------------- redis cache -------------
-REDIS_CACHE_HOST="localhost"  # Use "redis" for Docker Compose
-REDIS_CACHE_PORT=6379
-
-# ------------- redis queue -------------
-REDIS_QUEUE_HOST="localhost"  # Use "redis" for Docker Compose
-REDIS_QUEUE_PORT=6379
-
-# ------------- redis rate limit -------------
-REDIS_RATE_LIMIT_HOST="localhost"  # Use "redis" for Docker Compose
-REDIS_RATE_LIMIT_PORT=6379
+CACHE_MEMCACHED_HOST=localhost
+CACHE_MEMCACHED_PORT=11211
+CACHE_MEMCACHED_POOL_SIZE=10
+CACHE_MEMCACHED_CONNECT_TIMEOUT=5
 ```
 
-**Best Practices:**
-
-- **Development**: Use the same Redis instance for all services
-- **Production**: Use separate Redis instances for better isolation
+## Rate Limiting
 
 ```env
-# Production example with separate instances
-REDIS_CACHE_HOST="cache.redis.example.com"
-REDIS_QUEUE_HOST="queue.redis.example.com"
-REDIS_RATE_LIMIT_HOST="ratelimit.redis.example.com"
+RATE_LIMITER_ENABLED=true
+RATE_LIMITER_BACKEND=redis     # or "memcached"
+RATE_LIMITER_FAIL_OPEN=true    # allow requests when backend is unreachable
+DEFAULT_RATE_LIMIT_LIMIT=100
+DEFAULT_RATE_LIMIT_PERIOD=60
 ```
 
-### Caching Settings
-
-Client-side and server-side caching configuration:
+### Redis backend
 
 ```env
-# ------------- redis client-side cache -------------
-CLIENT_CACHE_MAX_AGE=30  # seconds
+RATE_LIMITER_REDIS_HOST=redis
+RATE_LIMITER_REDIS_PORT=6379
+RATE_LIMITER_REDIS_DB=1        # separate DB from cache (DB 0)
+RATE_LIMITER_REDIS_PASSWORD=
+RATE_LIMITER_REDIS_CONNECT_TIMEOUT=5
+RATE_LIMITER_REDIS_POOL_SIZE=10
 ```
 
-**Variables Explained:**
-
-- `CLIENT_CACHE_MAX_AGE`: How long browsers should cache responses
-
-### Rate Limiting
-
-Default rate limiting configuration:
+### Memcached backend
 
 ```env
-# ------------- default rate limit settings -------------
-DEFAULT_RATE_LIMIT_LIMIT=10      # requests per period
-DEFAULT_RATE_LIMIT_PERIOD=3600   # period in seconds (1 hour)
+RATE_LIMITER_MEMCACHED_HOST=localhost
+RATE_LIMITER_MEMCACHED_PORT=11211
+RATE_LIMITER_MEMCACHED_POOL_SIZE=10
 ```
 
-**Variables Explained:**
-
-- `DEFAULT_RATE_LIMIT_LIMIT`: Number of requests allowed per period
-- `DEFAULT_RATE_LIMIT_PERIOD`: Time window in seconds
-
-### Admin User
-
-First superuser account configuration:
+## Background Tasks (Taskiq)
 
 ```env
-# ------------- admin -------------
-ADMIN_NAME="Admin User"
-ADMIN_EMAIL="admin@example.com"
-ADMIN_USERNAME="admin"
-ADMIN_PASSWORD="secure_admin_password"
+TASKIQ_ENABLED=true
+TASKIQ_BROKER_TYPE=redis        # or "rabbitmq"
 ```
 
-**Variables Explained:**
-
-- `ADMIN_NAME`: Display name for the admin user
-- `ADMIN_EMAIL`: Email address for the admin account
-- `ADMIN_USERNAME`: Username for admin login
-- `ADMIN_PASSWORD`: Initial password (change after first login)
-
-### CORS Configuration
-
-Cross-Origin Resource Sharing (CORS) settings for frontend integration:
+### Redis broker
 
 ```env
-# ------------- CORS -------------
-CORS_ORIGINS=["*"]
-CORS_METHODS=["*"]
-CORS_HEADERS=["*"]
+TASKIQ_REDIS_HOST=redis
+TASKIQ_REDIS_PORT=6379
+TASKIQ_REDIS_DB=3               # separate DB from cache and rate limiter
+TASKIQ_REDIS_PASSWORD=
 ```
 
-**Variables Explained:**
-
-- `CORS_ORIGINS`: Comma-separated list of allowed origins (e.g., `["https://app.com","https://www.app.com"]`)
-- `CORS_METHODS`: Comma-separated list of allowed HTTP methods (e.g., `["GET","POST","PUT","DELETE"]`)
-- `CORS_HEADERS`: Comma-separated list of allowed headers (e.g., `["Authorization","Content-Type"]`)
-
-**Environment-Specific Values:**
+### RabbitMQ broker
 
 ```env
-# Development - Allow all origins
-CORS_ORIGINS=["*"]
-CORS_METHODS=["*"]
-CORS_HEADERS=["*"]
-
-# Production - Specific domains only
-CORS_ORIGINS=["https://yourapp.com","https://www.yourapp.com"]
-CORS_METHODS=["GET","POST","PUT","DELETE","PATCH"]
-CORS_HEADERS=["Authorization","Content-Type","X-Requested-With"]
+TASKIQ_RABBITMQ_HOST=localhost
+TASKIQ_RABBITMQ_PORT=5672
+TASKIQ_RABBITMQ_USER=guest
+TASKIQ_RABBITMQ_PASSWORD=guest
+TASKIQ_RABBITMQ_VHOST=/
 ```
 
-!!! danger "Security Warning"
-Never use wildcard (`*`) for `CORS_ORIGINS` in production environments. Always specify exact allowed domains to prevent unauthorized cross-origin requests.
-
-### User Tiers
-
-Initial tier configuration:
+### Worker tuning
 
 ```env
-# ------------- first tier -------------
-TIER_NAME="free"
+TASKIQ_WORKER_CONCURRENCY=2
+TASKIQ_MAX_TASKS_PER_WORKER=1000
 ```
 
-**Variables Explained:**
+## Web Server
 
-- `TIER_NAME`: Name of the default user tier
-
-### Environment Type
-
-Controls API documentation visibility and behavior:
+### CORS
 
 ```env
-# ------------- environment -------------
-ENVIRONMENT="local"  # local, staging, or production
+CORS_ENABLED=true
+CORS_ORIGINS=*                  # comma-separated list of origins
+CORS_ALLOW_CREDENTIALS=true
+CORS_ALLOW_METHODS=*
+CORS_ALLOW_HEADERS=*
 ```
 
-**Environment Types:**
-
-- **local**: Full API docs available publicly at `/docs`
-- **staging**: API docs available to superusers only
-- **production**: API docs completely disabled
-
-## Docker Compose Configuration
-
-### Basic Setup
-
-Docker Compose automatically loads the `.env` file:
-
-```yaml
-# In docker-compose.yml
-services:
-  web:
-    env_file:
-      - ./src/.env
-```
-
-### Development Overrides
-
-Create `docker-compose.override.yml` for local customizations:
-
-```yaml
-version: '3.8'
-services:
-  web:
-    ports:
-      - "8001:8000"  # Use different port
-    environment:
-      - DEBUG=true
-    volumes:
-      - ./custom-logs:/code/logs
-```
-
-### Service Configuration
-
-Understanding each Docker service:
-
-```yaml
-services:
-  web:          # FastAPI application
-  db:           # PostgreSQL database
-  redis:        # Redis for caching/queues
-  worker:       # ARQ background task worker
-  nginx:        # Reverse proxy (optional)
-```
-
-## Python Settings Classes
-
-Advanced configuration is handled in `src/app/core/config.py`:
-
-### Settings Composition
-
-The main `Settings` class inherits from multiple setting groups:
-
-```python
-class Settings(
-    AppSettings,
-    PostgresSettings,
-    CryptSettings,
-    FirstUserSettings,
-    RedisCacheSettings,
-    ClientSideCacheSettings,
-    RedisQueueSettings,
-    RedisRateLimiterSettings,
-    DefaultRateLimitSettings,
-    EnvironmentSettings,
-    CORSSettings,
-):
-    pass
-```
-
-### Adding Custom Settings
-
-Create your own settings group:
-
-```python
-class CustomSettings(BaseSettings):
-    CUSTOM_API_KEY: str = ""
-    CUSTOM_TIMEOUT: int = 30
-    ENABLE_FEATURE_X: bool = False
-
-
-# Add to main Settings class
-class Settings(
-    AppSettings,
-    # ... other settings ...
-    CustomSettings,
-):
-    pass
-```
-
-### Opting Out of Services
-
-Remove unused services by excluding their settings:
-
-```python
-# Minimal setup without Redis services
-class Settings(
-    AppSettings,
-    PostgresSettings,
-    CryptSettings,
-    FirstUserSettings,
-    # Removed: RedisCacheSettings
-    # Removed: RedisQueueSettings
-    # Removed: RedisRateLimiterSettings
-    EnvironmentSettings,
-):
-    pass
-```
-
-## Database Configuration
-
-### Alembic Configuration
-
-Database migrations are configured in `src/alembic.ini`:
-
-```ini
-[alembic]
-script_location = migrations
-sqlalchemy.url = postgresql://%(POSTGRES_USER)s:%(POSTGRES_PASSWORD)s@%(POSTGRES_SERVER)s:%(POSTGRES_PORT)s/%(POSTGRES_DB)s
-```
-
-### Connection Pooling
-
-SQLAlchemy connection pool settings in `src/app/core/db/database.py`:
-
-```python
-engine = create_async_engine(
-    DATABASE_URL,
-    pool_size=20,  # Number of connections to maintain
-    max_overflow=30,  # Additional connections allowed
-    pool_timeout=30,  # Seconds to wait for connection
-    pool_recycle=1800,  # Seconds before connection refresh
-)
-```
-
-### Database Best Practices
-
-**Connection Pool Sizing:**
-
-- Start with `pool_size=20`, `max_overflow=30`
-- Monitor connection usage and adjust based on load
-- Use connection pooling monitoring tools
-
-**Migration Strategy:**
-
-- Always backup database before running migrations
-- Test migrations on staging environment first
-- Use `alembic revision --autogenerate` for model changes
-
-## Security Configuration
-
-### JWT Token Configuration
-
-Customize JWT behavior in `src/app/core/security.py`:
-
-```python
-def create_access_token(data: dict, expires_delta: timedelta = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-```
-
-### CORS Configuration
-
-Customize Cross-Origin Resource Sharing in `src/app/core/setup.py`:
-
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Specify allowed origins
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],  # Specify allowed methods
-    allow_headers=["*"],
-)
-```
-
-**Production CORS Settings:**
-
-```python
-# Never use wildcard (*) in production
-allow_origins = (["https://yourapp.com", "https://www.yourapp.com"],)
-```
-
-### Security Headers
-
-Add security headers middleware:
-
-```python
-from starlette.middleware.base import BaseHTTPMiddleware
-
-
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        return response
-```
-
-## Logging Configuration
-
-### Basic Logging Setup
-
-Configure logging in `src/app/core/logger.py`:
-
-```python
-import logging
-from logging.handlers import RotatingFileHandler
-
-# Set log level
-LOGGING_LEVEL = logging.INFO
-
-# Configure file rotation
-file_handler = RotatingFileHandler("logs/app.log", maxBytes=10485760, backupCount=5)  # 10MB  # Keep 5 backup files
-```
-
-### Structured Logging
-
-Use structured logging for better observability:
-
-```python
-import structlog
-
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.processors.JSONRenderer(),
-    ],
-    logger_factory=structlog.stdlib.LoggerFactory(),
-)
-```
-
-### Log Levels by Environment
-
-```python
-# Environment-specific log levels
-LOG_LEVELS = {"local": logging.DEBUG, "staging": logging.INFO, "production": logging.WARNING}
-
-LOGGING_LEVEL = LOG_LEVELS.get(settings.ENVIRONMENT, logging.INFO)
-```
-
-## Environment-Specific Configurations
-
-### Development (.env.development)
+!!! danger "CORS in Production"
+    Never use `*` for `CORS_ORIGINS` in production. Specify exact domains:
+    ```env
+    CORS_ORIGINS=https://yourapp.com,https://www.yourapp.com
+    CORS_ALLOW_METHODS=GET,POST,PUT,DELETE,PATCH
+    CORS_ALLOW_HEADERS=Authorization,Content-Type
+    ```
+
+### Compression
 
 ```env
-ENVIRONMENT="local"
-POSTGRES_SERVER="localhost"
-REDIS_CACHE_HOST="localhost"
-SECRET_KEY="dev-secret-key-not-for-production"
-ACCESS_TOKEN_EXPIRE_MINUTES=60  # Longer for development
-DEBUG=true
+GZIP_ENABLED=true
+GZIP_MINIMUM_SIZE=1000
 ```
 
-### Staging (.env.staging)
+### API Docs
 
 ```env
-ENVIRONMENT="staging"
-POSTGRES_SERVER="staging-db.example.com"
-REDIS_CACHE_HOST="staging-redis.example.com"
-SECRET_KEY="staging-secret-key-different-from-prod"
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-DEBUG=false
+ENABLE_DOCS_IN_PRODUCTION=false  # serve /docs even when ENVIRONMENT=production
+OPENAPI_PREFIX=                   # path prefix for the OpenAPI schema
 ```
 
-### Production (.env.production)
+## Authentication & Security
 
 ```env
-ENVIRONMENT="production"
-POSTGRES_SERVER="prod-db.example.com"
-REDIS_CACHE_HOST="prod-redis.example.com"
-SECRET_KEY="ultra-secure-production-key-generated-with-openssl"
-ACCESS_TOKEN_EXPIRE_MINUTES=15
-DEBUG=false
-REDIS_CACHE_PORT=6380  # Custom port for security
-POSTGRES_PORT=5433     # Custom port for security
+SECRET_KEY=insecure-secret-key-change-this-in-production
+
+# Production security validation (enabled by default in production)
+PRODUCTION_SECURITY_VALIDATION_ENABLED=true
+PRODUCTION_SECURITY_STRICT_MODE=false
 ```
 
-## Advanced Configuration
-
-### Custom Middleware
-
-Add custom middleware in `src/app/core/setup.py`:
-
-```python
-def create_application(router, settings, **kwargs):
-    app = FastAPI(...)
-
-    # Add custom middleware
-    app.add_middleware(CustomMiddleware, setting=value)
-    app.add_middleware(TimingMiddleware)
-    app.add_middleware(RequestIDMiddleware)
-
-    return app
-```
-
-### Feature Toggles
-
-Implement feature flags:
-
-```python
-class FeatureSettings(BaseSettings):
-    ENABLE_ADVANCED_CACHING: bool = False
-    ENABLE_ANALYTICS: bool = True
-    ENABLE_EXPERIMENTAL_FEATURES: bool = False
-    ENABLE_API_VERSIONING: bool = True
-
-
-# Use in endpoints
-if settings.ENABLE_ADVANCED_CACHING:
-    # Advanced caching logic
-    pass
-```
-
-## Configuration Validation
-
-### Environment Validation
-
-Add validation to prevent misconfiguration:
-
-```python
-def validate_settings():
-    if not settings.SECRET_KEY:
-        raise ValueError("SECRET_KEY must be set")
-
-    if settings.ENVIRONMENT == "production":
-        if settings.SECRET_KEY == "dev-secret-key":
-            raise ValueError("Production must use secure SECRET_KEY")
-
-        if settings.DEBUG:
-            raise ValueError("DEBUG must be False in production")
-```
-
-### Runtime Checks
-
-Add validation to application startup:
-
-```python
-@app.on_event("startup")
-async def startup_event():
-    validate_settings()
-    await check_database_connection()
-    await check_redis_connection()
-    logger.info(f"Application started in {settings.ENVIRONMENT} mode")
-```
-
-## Configuration Troubleshooting
-
-### Common Issues
-
-**Environment Variables Not Loading:**
+Generate a strong key:
 
 ```bash
-# Check file location and permissions
-ls -la src/.env
-
-# Check file format (no spaces around =)
-cat src/.env | grep "=" | head -5
-
-# Verify environment loading in Python
-python -c "from src.app.core.config import settings; print(settings.APP_NAME)"
+python -c "import secrets; print(secrets.token_urlsafe(64))"
 ```
 
-**Database Connection Failed:**
+### Sessions
+
+```env
+SESSION_TIMEOUT_MINUTES=30
+SESSION_CLEANUP_INTERVAL_MINUTES=15
+MAX_SESSIONS_PER_USER=5
+SESSION_SECURE_COOKIES=true
+SESSION_BACKEND=redis
+SESSION_COOKIE_MAX_AGE=86400
+```
+
+### CSRF
+
+```env
+# Set false to disable CSRF validation in dev/test
+CSRF_ENABLED=true
+```
+
+### Login Rate Limiting
+
+```env
+LOGIN_MAX_ATTEMPTS=5
+LOGIN_WINDOW_MINUTES=15
+```
+
+### OAuth
+
+```env
+OAUTH_REDIRECT_BASE_URL=http://localhost:8000
+
+# Google OAuth (leave empty to disable)
+OAUTH_GOOGLE_CLIENT_ID=
+OAUTH_GOOGLE_CLIENT_SECRET=
+
+# GitHub OAuth (provider scaffolded; routes not yet wired)
+OAUTH_GITHUB_CLIENT_ID=
+OAUTH_GITHUB_CLIENT_SECRET=
+```
+
+## Admin Interface (SQLAdmin)
+
+```env
+ADMIN_ENABLED=true              # enables /admin
+```
+
+## Application Metadata
+
+```env
+DEBUG=false
+APP_NAME=FastAPI Boilerplate
+APP_DESCRIPTION=Modular FastAPI starter
+VERSION=0.18.0
+CONTACT_NAME=Support
+CONTACT_EMAIL=support@example.com
+LICENSE_NAME=MIT
+```
+
+### API Settings (optional overrides)
+
+```env
+# API_PREFIX=/api
+# DOCS_URL=/docs
+# REDOC_URL=/redoc
+```
+
+## Initial Setup
+
+These are read by `python -m scripts.setup_initial_data`:
+
+```env
+ADMIN_NAME=Admin User
+ADMIN_EMAIL=admin@example.com
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your-secure-password
+```
+
+The default tier name is also configurable (defaults to `free`):
+
+```env
+DEFAULT_TIER_NAME=free
+```
+
+## Logging
+
+```env
+LOG_LEVEL=INFO
+LOG_FORMAT=structured           # simple | detailed | structured | json
+LOG_CONSOLE_ENABLED=true
+LOG_FILE_ENABLED=false
+LOG_FILE_PATH=logs/app.log
+LOG_FILE_MAX_SIZE=10485760      # 10 MB
+LOG_FILE_BACKUP_COUNT=5
+LOG_CORRELATION_ID=true
+LOG_STRUCTURED_CONTEXT=true
+LOG_PERFORMANCE_METRICS=false
+LOG_SQL_QUERIES=false
+LOG_INCLUDE_STACKTRACE=true
+LOG_DEVELOPMENT_VERBOSE=true
+LOG_PRODUCTION_OPTIMIZE=true
+```
+
+## Production Security Checklist
+
+Before deploying to production:
+
+1. Generate a strong `SECRET_KEY` (at least 64 bytes of entropy)
+2. Use unique passwords for the database and every Redis instance
+3. Use separate Redis databases for each service (`CACHE_REDIS_DB=0`, `RATE_LIMITER_REDIS_DB=1`, `TASKIQ_REDIS_DB=3`)
+4. Restrict `CORS_ORIGINS` to your real domains (no `*`)
+5. Set strong admin credentials (`ADMIN_USERNAME`, `ADMIN_PASSWORD`)
+6. Review session timeouts for your security posture
+7. Set `ENVIRONMENT=production` to enable the security validator
+8. If using RabbitMQ, replace the `guest/guest` defaults
+
+## Troubleshooting
+
+### Variables Not Loading
 
 ```bash
-# Test connection manually
-psql -h localhost -U postgres -d myapp
+# Check the file location
+ls -la backend/.env
 
-# Check if PostgreSQL is running
-systemctl status postgresql
-# or on macOS
+# Make sure there are no spaces around =
+grep "=" backend/.env | head -5
+
+# Verify what Python sees
+cd backend
+uv run python -c "from src.infrastructure.config.settings import get_settings; s = get_settings(); print(s.APP_NAME, s.ENVIRONMENT)"
+```
+
+### Database Connection Failed
+
+```bash
+# Linux
+sudo systemctl status postgresql
+psql -h localhost -U postgres -d postgres
+
+# macOS
 brew services list | grep postgresql
 ```
 
-**Redis Connection Failed:**
+### Redis Connection Failed
 
 ```bash
-# Test Redis connection
-redis-cli -h localhost -p 6379 ping
+redis-cli -h localhost -p 6379 ping  # should print PONG
 
-# Check Redis status
-systemctl status redis
-# or on macOS
+# Linux
+sudo systemctl status redis-server
+
+# macOS
 brew services list | grep redis
 ```
 
-### Configuration Testing
+## See Also
 
-Test your configuration with a simple script:
-
-```python
-# test_config.py
-import asyncio
-from src.app.core.config import settings
-from src.app.core.db.database import async_get_db
-
-
-async def test_config():
-    print(f"App: {settings.APP_NAME}")
-    print(f"Environment: {settings.ENVIRONMENT}")
-
-    # Test database
-    try:
-        db = await anext(async_get_db())
-        print("✓ Database connection successful")
-        await db.close()
-    except Exception as e:
-        print(f"✗ Database connection failed: {e}")
-
-    # Test Redis (if enabled)
-    try:
-        from src.app.core.utils.cache import redis_client
-
-        await redis_client.ping()
-        print("✓ Redis connection successful")
-    except Exception as e:
-        print(f"✗ Redis connection failed: {e}")
-
-
-if __name__ == "__main__":
-    asyncio.run(test_config())
-```
-
-Run with:
-
-```bash
-uv run python test_config.py
-```
+- **[Settings Classes](settings-classes.md)** — How env vars are turned into Python settings
+- **[Docker Setup](docker-setup.md)** — Compose configuration
+- **[Environment-Specific](environment-specific.md)** — Recommended values per environment

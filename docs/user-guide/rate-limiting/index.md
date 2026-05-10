@@ -1,481 +1,338 @@
 # Rate Limiting
 
-The boilerplate includes a sophisticated rate limiting system built on Redis that protects your API from abuse while supporting user tiers with different access levels. This system provides flexible, scalable rate limiting for production applications.
+The boilerplate ships a flexible rate limiter that supports per-tier, per-path limits with Redis or Memcached backends. This page covers how the pieces fit together, how to enable enforcement on your routes, and the gotchas to know upfront.
 
-## Overview
+## What's Built In
 
-Rate limiting controls how many requests users can make within a specific time period. The boilerplate implements:
+```text
+backend/src/infrastructure/rate_limit/
+├── base.py            RateLimiterBackend abstract base
+├── backends/          Redis and Memcached implementations
+├── exceptions.py      RateLimitException, RateLimiterBackendException
+├── initialize.py      initialize_rate_limiter() / close_rate_limiter()
+├── middleware.py      RateLimiterMiddleware + check_rate_limit dependency
+├── provider.py        increment_and_check, get_count, reset
+└── utils.py           sanitize_path
 
-- **Redis-Based Storage**: Fast, distributed rate limiting using Redis
-- **User Tier System**: Different limits for different user types  
-- **Path-Specific Limits**: Granular control per API endpoint
-- **Fallback Protection**: Default limits for unauthenticated users
-
-## Quick Example
-
-```python
-from fastapi import Depends
-from app.api.dependencies import rate_limiter_dependency
-
-@router.post("/api/v1/posts", dependencies=[Depends(rate_limiter_dependency)])
-async def create_post(post_data: PostCreate):
-    # This endpoint is automatically rate limited based on:
-    # - User's tier (basic, premium, enterprise)  
-    # - Specific limits for the /posts endpoint
-    # - Default limits for unauthenticated users
-    return await crud_posts.create(db=db, object=post_data)
+backend/src/modules/rate_limit/
+├── models.py          RateLimit (tier_id, path, limit, period)
+├── routes.py          GET / GET-by-name / PATCH / DELETE on /api/v1/rate-limits/
+├── crud.py / service.py
+└── schemas.py
 ```
 
-## Architecture
+The middleware and provider are wired up; the backend is initialized in the app's lifespan. **Enforcement is opt-in per route** — see below.
 
-### Rate Limiting Components
+## How a Request Flows Through It
 
-**Rate Limiter Class**: Singleton Redis client for checking limits<br>
-**User Tiers**: Database-stored user subscription levels<br>
-**Rate Limit Rules**: Path-specific limits per tier<br>
-**Dependency Injection**: Automatic enforcement via FastAPI dependencies<br>
+1. **Request arrives**, `RateLimiterMiddleware` is on the stack but **does not enforce limits** — it only attaches `X-RateLimit-*` headers to the response after the handler runs.
+2. **The route's `Depends(check_rate_limit)` runs.** This is the actual enforcement point. Without this dependency on a route, no limit is checked.
+3. **`check_rate_limit` extracts the user** from `request.state.user` (or falls back to client IP for anonymous requests), looks up the user's tier and the matching rate-limit row from the database, and computes `(limit, period)`.
+4. **`increment_and_check`** atomically increments the counter at `ratelimit:{user_or_ip}:{sanitized_path}` and returns `(count, is_limited)`. The TTL on the key is set on first increment to `period` seconds.
+5. **If `is_limited`**, raises `RateLimitException` (HTTP 429). Otherwise, sets `request.state.rate_limit_headers` so the middleware can attach them to the response.
 
-### How It Works
+The key shape (no window suffix — the TTL handles the window):
 
-1. **Request Arrives**: User makes API request to protected endpoint
-2. **User Identification**: System identifies user and their tier
-3. **Limit Lookup**: Finds applicable rate limit for user tier + endpoint
-4. **Redis Check**: Increments counter in Redis sliding window
-5. **Allow/Deny**: Request proceeds or returns 429 Too Many Requests
-
-## User Tier System
-
-### Default Tiers
-
-The system supports flexible user tiers with different access levels:
-
-```python
-# Example tier configuration
-tiers = {
-    "free": {
-        "requests_per_minute": 10,
-        "requests_per_hour": 100,
-        "special_endpoints": {
-            "/api/v1/ai/generate": {"limit": 2, "period": 3600},  # 2 per hour
-            "/api/v1/exports": {"limit": 1, "period": 86400},     # 1 per day
-        }
-    },
-    "premium": {
-        "requests_per_minute": 60,
-        "requests_per_hour": 1000,
-        "special_endpoints": {
-            "/api/v1/ai/generate": {"limit": 50, "period": 3600},
-            "/api/v1/exports": {"limit": 10, "period": 86400},
-        }
-    },
-    "enterprise": {
-        "requests_per_minute": 300,
-        "requests_per_hour": 10000,
-        "special_endpoints": {
-            "/api/v1/ai/generate": {"limit": 500, "period": 3600},
-            "/api/v1/exports": {"limit": 100, "period": 86400},
-        }
-    }
-}
+```text
+ratelimit:{user_id_or_ip}:{sanitized_path}
 ```
 
-### Rate Limit Database Structure
+## Enabling Enforcement on a Route
+
+Add the dependency:
 
 ```python
-# Rate limits are stored per tier and path
-class RateLimit:
-    id: int
-    tier_id: int           # Links to user tier
-    name: str             # Descriptive name
-    path: str             # API path (sanitized)
-    limit: int            # Number of requests allowed
-    period: int           # Time period in seconds
+from fastapi import APIRouter, Depends
+from src.infrastructure.rate_limit import check_rate_limit
+
+router = APIRouter()
+
+
+@router.post("/widgets", dependencies=[Depends(check_rate_limit)])
+async def create_widget(...): ...
 ```
 
-## Implementation Details
-
-### Automatic Rate Limiting
-
-The system automatically applies rate limiting through dependency injection:
+Or apply it to every route in a router:
 
 ```python
-@router.post("/protected-endpoint", dependencies=[Depends(rate_limiter_dependency)])
-async def protected_endpoint():
-    """This endpoint is automatically rate limited."""
-    pass
-
-# The dependency:
-# 1. Identifies the user and their tier
-# 2. Looks up rate limits for this path
-# 3. Checks Redis counter
-# 4. Allows or blocks the request
+router = APIRouter(dependencies=[Depends(check_rate_limit)])
 ```
-#### Example Dependency Implementation
 
-To make the rate limiting dependency functional, you must implement how user tiers and paths resolve to actual rate limits.
-Below is a complete example using Redis and the database to determine per-tier and per-path restrictions.
+That's all that's required — provided the rate limiter is enabled (`RATE_LIMITER_ENABLED=true`), every request to that route is checked.
+
+!!! warning "Currently no built-in route uses `check_rate_limit`"
+    The boilerplate's shipped routes (`/api/v1/users`, `/api/v1/auth`, `/api/v1/tiers`, `/api/v1/rate-limits`, `/api/v1/api-keys`) do **not** apply `check_rate_limit` by default. You add the dependency where you want enforcement. The middleware will still attach `X-RateLimit-*` headers, but only when something has populated `request.state.rate_limit_headers` — which only happens after `check_rate_limit` has run.
+
+## Configuration
+
+```env
+# Master toggle
+RATE_LIMITER_ENABLED=true
+
+# Backend selection (mirrors the cache backend selector)
+RATE_LIMITER_BACKEND=redis            # or "memcached"
+
+# Behavior on backend errors:
+#   true  → log and let the request through (recommended)
+#   false → raise RateLimitException ("Access denied as a precaution")
+RATE_LIMITER_FAIL_OPEN=true
+
+# Defaults applied when the user has no tier or no matching rate-limit row
+DEFAULT_RATE_LIMIT_LIMIT=100
+DEFAULT_RATE_LIMIT_PERIOD=60          # seconds — 100/60s by default
+
+# Redis backend (when RATE_LIMITER_BACKEND=redis)
+RATE_LIMITER_REDIS_HOST=redis         # use "localhost" without Docker
+RATE_LIMITER_REDIS_PORT=6379
+RATE_LIMITER_REDIS_DB=1               # separate from CACHE / SESSION / TASKIQ
+RATE_LIMITER_REDIS_PASSWORD=
+RATE_LIMITER_REDIS_CONNECT_TIMEOUT=5
+RATE_LIMITER_REDIS_POOL_SIZE=10
+
+# Memcached backend (when RATE_LIMITER_BACKEND=memcached)
+RATE_LIMITER_MEMCACHED_HOST=localhost
+RATE_LIMITER_MEMCACHED_PORT=11211
+RATE_LIMITER_MEMCACHED_POOL_SIZE=10
+```
+
+When `RATE_LIMITER_ENABLED=false`, `check_rate_limit` returns immediately — the dependency is a no-op. Useful in tests and for isolating performance issues.
+
+## User-Tier vs IP-Based Limits
+
+The rate limiter has two paths depending on whether `request.state.user` is set:
 
 ```python
-async def rate_limiter_dependency(
-    request: Request,
-    db: AsyncSession = Depends(async_get_db),
-    user=Depends(get_current_user_optional),
-):
-    """
-    Enforces rate limits per user tier and API path.
-
-    - Identifies user (or defaults to IP-based anonymous rate limit)
-    - Finds tier-specific limit for the request path
-    - Checks Redis counter to determine if request should be allowed
-    """
-    path = sanitize_path(request.url.path)
-    user_id = getattr(user, "id", None) or request.client.host or "anonymous"
-
-    # Determine user tier (default to "free" or anonymous)
-    if user and getattr(user, "tier_id", None):
-        tier = await crud_tiers.get(db=db, id=user.tier_id)
+# Inside _check_rate_limit
+if user:
+    user_id = user["id"]
+    tier = await crud_tiers.get(db=db, id=user["tier_id"], ...)
+    if tier:
+        rate_limit = await crud_rate_limits.get(db=db, tier_id=tier["id"], path=sanitized_path, ...)
+        if rate_limit:
+            limit, period = rate_limit["limit"], rate_limit["period"]
+        else:
+            limit, period = DEFAULT_LIMIT, DEFAULT_PERIOD
     else:
-        tier = await crud_tiers.get(db=db, name="free")
-
-    if not tier:
-        raise RateLimitException("Tier configuration not found")
-
-    # Find specific rate limit rule for this path + tier
-    rate_limit_rule = await crud_rate_limits.get_by_path_and_tier(
-        db=db, path=path, tier_id=tier.id
-    )
-
-    # Use default limits if no specific rule is found
-    limit = getattr(rate_limit_rule, "limit", 100)
-    period = getattr(rate_limit_rule, "period", 3600)
-
-    # Check rate limit in Redis
-    is_limited = await rate_limiter.is_rate_limited(
-        db=db,
-        user_id=user_id,
-        path=path,
-        limit=limit,
-        period=period,
-    )
-
-    if is_limited:
-        raise RateLimitException(
-            f"Rate limit exceeded for path '{path}'. Try again later."
-        )
+        limit, period = DEFAULT_LIMIT, DEFAULT_PERIOD
+else:
+    # Anonymous — key by client IP
+    user_id = request.client.host
+    limit, period = DEFAULT_LIMIT, DEFAULT_PERIOD
 ```
 
-### Redis-Based Counting
+!!! warning "`request.state.user` is not populated automatically"
+    The default session auth dependency (`get_current_user`) does not write the user back to `request.state.user`. Until you add a small helper that does, **every request looks anonymous to the rate limiter**, and tier-specific limits won't apply.
 
-The rate limiter uses Redis for distributed, high-performance counting:
+A minimal middleware to bridge the two:
 
 ```python
-# Sliding window implementation
-async def is_rate_limited(self, user_id: int, path: str, limit: int, period: int) -> bool:
-    current_timestamp = int(datetime.now(UTC).timestamp())
-    window_start = current_timestamp - (current_timestamp % period)
-    
-    # Create unique key for this user/path/window
-    key = f"ratelimit:{user_id}:{sanitized_path}:{window_start}"
-    
-    # Increment counter
-    current_count = await redis_client.incr(key)
-    
-    # Set expiration on first increment
-    if current_count == 1:
-        await redis_client.expire(key, period)
-    
-    # Check if limit exceeded
-    return current_count > limit
+# infrastructure/auth/rate_limit_user_middleware.py
+from starlette.middleware.base import BaseHTTPMiddleware
+from src.infrastructure.auth.session.dependencies import _resolve_session_user  # pseudo
+
+
+class AttachUserToRateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        try:
+            user = await _resolve_session_user(request)
+            if user:
+                request.state.user = user
+        except Exception:
+            pass
+        return await call_next(request)
 ```
 
-### Path Sanitization
+Mount this **before** `RateLimiterMiddleware`. The exact resolution code depends on how you reuse your session backend — if this is a setup you need, copy the validation logic from `infrastructure/auth/session/dependencies.py:get_current_user` into the middleware.
 
-API paths are sanitized for consistent Redis key generation:
+For most teams, IP-based default limits (`100 req/60s`) are enough until you have an actual product reason to bring tiers into the rate-limit story.
+
+## Path Sanitization
+
+Paths are normalized for consistent keys:
 
 ```python
 def sanitize_path(path: str) -> str:
     return path.strip("/").replace("/", "_")
 
-# Examples:
-# "/api/v1/users" → "api_v1_users"
-# "/posts/{id}" → "posts_{id}"
+# /api/v1/users         → "api_v1_users"
+# /api/v1/users/42      → "api_v1_users_42"
+# /api/v1/users/{id}    → "api_v1_users_{id}"
 ```
 
-## Configuration
+The middleware first looks up the `RateLimit` row by sanitized path. If nothing matches, it falls back to looking up the original path. **In practice you should store the sanitized form in the database** — that's what the lookup primarily uses, and it's what the cache key format mirrors.
 
-### Environment Variables
+Note: paths with path parameters (`/users/42`) sanitize to `api_v1_users_42`, which means **each individual resource ID gets its own counter**. That's almost always what you want (otherwise a single hot resource could rate-limit unrelated reads), but if you specifically want a single counter for a parameterized route, store the rule under the literal pattern `api_v1_users_{id}` and write a small middleware that matches the route against the path template before sanitizing.
 
-```bash
-# Rate Limiting Settings
-DEFAULT_RATE_LIMIT_LIMIT=100      # Default requests per period
-DEFAULT_RATE_LIMIT_PERIOD=3600    # Default period (1 hour)
+## Managing Rate-Limit Rules
 
-# Redis Rate Limiter Settings  
-REDIS_RATE_LIMITER_HOST=localhost
-REDIS_RATE_LIMITER_PORT=6379
-REDIS_RATE_LIMITER_DB=2           # Separate from cache/queue
-```
-
-### Creating User Tiers
+The `RateLimit` model:
 
 ```python
-# Create tiers via API (superuser only)
-POST /api/v1/tiers
-{
-    "name": "premium",
-    "description": "Premium subscription with higher limits"
-}
+class RateLimit(Base, TimestampMixin, SoftDeleteMixin):
+    __tablename__ = "rate_limits"
 
-# Assign tier to user
-PUT /api/v1/users/{user_id}/tier
-{
-    "tier_id": 2
-}
+    id: int
+    tier_id: int        # FK to tiers.id
+    name: str           # unique — used as the URL path on /rate-limits/{name}
+    path: str           # sanitized path the rule applies to
+    limit: int          # max requests per period
+    period: int         # seconds
 ```
 
-### Setting Rate Limits
+### What the API exposes
+
+| Method | Path                         | Auth        | Notes                                    |
+|--------|------------------------------|-------------|------------------------------------------|
+| GET    | `/api/v1/rate-limits/`       | Public      | Paginated list of all rate-limit rules   |
+| GET    | `/api/v1/rate-limits/{name}` | Public      | Get a rule by name                       |
+| PATCH  | `/api/v1/rate-limits/{name}` | Superuser   | Update an existing rule                  |
+| DELETE | `/api/v1/rate-limits/{name}` | Superuser   | Delete a rule                            |
+
+There's **no POST endpoint** for creating rate-limit rules. To seed initial rules, you have three options:
+
+### Option 1: SQL / Migration
+
+Add an Alembic migration that inserts the rows:
 
 ```python
-# Create rate limits per tier and endpoint
-POST /api/v1/tier/premium/rate_limit
-{
-    "name": "premium_posts_limit",
-    "path": "/api/v1/posts",
-    "limit": 100,        # 100 requests
-    "period": 3600       # per hour
-}
-
-# Different limits for different endpoints
-POST /api/v1/tier/free/rate_limit  
-{
-    "name": "free_ai_limit",
-    "path": "/api/v1/ai/generate",
-    "limit": 5,          # 5 requests  
-    "period": 86400      # per day
-}
+# alembic/versions/xxxx_seed_rate_limits.py
+def upgrade():
+    op.execute("""
+        INSERT INTO rate_limits (tier_id, name, path, "limit", period, created_at)
+        VALUES
+            (1, 'free_widgets_create', 'api_v1_widgets', 10, 60, NOW()),
+            (2, 'pro_widgets_create',  'api_v1_widgets', 100, 60, NOW())
+    """)
 ```
 
-## Usage Patterns
+### Option 2: Custom Seed Script
 
-### Basic Protection
+Add a one-off in `backend/scripts/`:
 
 ```python
-# Protect all endpoints in a router
-router = APIRouter(dependencies=[Depends(rate_limiter_dependency)])
+# backend/scripts/setup_rate_limits.py
+import asyncio
 
-@router.get("/users")
-async def get_users():
-    """Rate limited based on user tier."""
-    pass
+from src.infrastructure.database.session import local_session
+from src.modules.rate_limit.crud import crud_rate_limits
 
-@router.post("/posts")  
-async def create_post():
-    """Rate limited based on user tier."""
-    pass
+
+async def main():
+    async with local_session() as db:
+        await crud_rate_limits.create(db=db, object={
+            "tier_id": 1, "name": "free_widgets_create",
+            "path": "api_v1_widgets", "limit": 10, "period": 60,
+        })
+        await db.commit()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-### Selective Protection
+Run with `uv run python -m scripts.setup_rate_limits` (from `backend/`).
+
+### Option 3: Add a SQLAdmin View
+
+Mirror `UserAdmin` and `TierAdmin` to add a `RateLimitAdmin` view — see [Admin Panel → Adding Models](../admin-panel/adding-models.md). This gives you a UI for creating, editing, and deleting rules.
+
+## Response Headers
+
+When `check_rate_limit` runs successfully, the middleware attaches:
+
+| Header                | Meaning                                          |
+|-----------------------|--------------------------------------------------|
+| `X-RateLimit-Limit`   | The configured limit for this user × path        |
+| `X-RateLimit-Remaining` | How many requests are left in the current window |
+| `X-RateLimit-Reset`   | Period (seconds) for the window                  |
+
+These are standard-ish (formatted like the GitHub / Stripe convention, not RFC 6585). Frontends can read them to surface graceful "you're approaching your limit" UI.
+
+## Programmatic Cache-like Operations
+
+The provider exposes the same primitives the middleware uses, in case you need to apply rate limits outside the HTTP request path (background jobs that throttle calls to a third party, for example):
 
 ```python
-# Protect only specific endpoints
-@router.get("/public-data")
-async def get_public_data():
-    """No rate limiting - public endpoint."""
-    pass
+from src.infrastructure.rate_limit import increment_and_check, get_count, reset
 
-@router.post("/premium-feature", dependencies=[Depends(rate_limiter_dependency)])
-async def premium_feature():
-    """Rate limited - premium feature."""
-    pass
+count, is_limited = await increment_and_check(
+    key="external_api_calls:user_42",
+    limit=100,
+    period=3600,
+    fail_open=True,
+)
+
+current = await get_count("external_api_calls:user_42")
+await reset("external_api_calls:user_42")
 ```
 
-### Custom Error Handling
+Use a key prefix that doesn't collide with the HTTP rate limiter's `ratelimit:` namespace.
 
-```python
-from app.core.exceptions.http_exceptions import RateLimitException
+## Backend Differences
 
-@app.exception_handler(RateLimitException)
-async def rate_limit_handler(request: Request, exc: RateLimitException):
-    """Custom rate limit error response."""
-    return JSONResponse(
-        status_code=429,
-        content={
-            "error": "Rate limit exceeded",
-            "message": "Too many requests. Please try again later.",
-            "retry_after": 60  # Suggest retry time
-        },
-        headers={"Retry-After": "60"}
-    )
-```
+| Feature                     | Redis | Memcached |
+|-----------------------------|-------|-----------|
+| Atomic increment + TTL set  | Yes   | Yes       |
+| `get_count` / `reset`       | Yes   | Yes       |
+| Pattern-based reset         | Yes   | No        |
+| Connection pooling          | Yes   | Yes       |
 
-## Monitoring and Analytics
+Both backends do everything the middleware needs. Pick Redis if you're already running it for cache or Taskiq.
 
-### Rate Limit Metrics
+## Production Considerations
 
-```python
-@router.get("/admin/rate-limit-stats")
-async def get_rate_limit_stats():
-    """Monitor rate limiting effectiveness."""
-    
-    # Get Redis statistics
-    redis_info = await rate_limiter.client.info()
-    
-    # Count current rate limit keys
-    pattern = "ratelimit:*"
-    keys = await rate_limiter.client.keys(pattern)
-    
-    # Analyze by endpoint
-    endpoint_stats = {}
-    for key in keys:
-        parts = key.split(":")
-        if len(parts) >= 3:
-            endpoint = parts[2]
-            endpoint_stats[endpoint] = endpoint_stats.get(endpoint, 0) + 1
-    
-    return {
-        "total_active_limits": len(keys),
-        "redis_memory_usage": redis_info.get("used_memory_human"),
-        "endpoint_stats": endpoint_stats
-    }
-```
+### Pool sizing
 
-### User Analytics
+`RATE_LIMITER_REDIS_POOL_SIZE=10` is enough for typical workloads. If you're seeing `redis.exceptions.ConnectionError` under load, it usually means pool exhaustion — raise the pool size or check upstream connection-leak issues first.
 
-```python
-async def analyze_user_usage(user_id: int, days: int = 7):
-    """Analyze user's API usage patterns."""
-    
-    # This would require additional logging/analytics
-    # implementation to track request patterns
-    
-    return {
-        "user_id": user_id,
-        "tier": "premium",
-        "requests_last_7_days": 2540,
-        "average_requests_per_day": 363,
-        "top_endpoints": [
-            {"path": "/api/v1/posts", "count": 1200},
-            {"path": "/api/v1/users", "count": 800},
-            {"path": "/api/v1/ai/generate", "count": 540}
-        ],
-        "rate_limit_hits": 12,  # Times user hit rate limits
-        "suggested_tier": "enterprise"  # Based on usage patterns
-    }
-```
+### Fail-open vs fail-closed
 
-## Best Practices
+The default `RATE_LIMITER_FAIL_OPEN=true` means a Redis outage doesn't take your API down — requests pass through unrate-limited. This is the right call for most public APIs.
 
-### Rate Limit Design
+If you specifically need rate limits enforced even during cache outages (e.g. you're protecting an expensive AI inference endpoint that you don't want hammered), set `RATE_LIMITER_FAIL_OPEN=false`. Be aware: a flaky Redis connection now translates directly into 429s for users.
 
-```python
-# Design limits based on resource cost
-expensive_endpoints = {
-    "/api/v1/ai/generate": {"limit": 10, "period": 3600},    # AI is expensive
-    "/api/v1/reports/export": {"limit": 3, "period": 86400}, # Export is heavy
-    "/api/v1/bulk/import": {"limit": 1, "period": 3600},     # Import is intensive
-}
+### Window behavior
 
-# More generous limits for lightweight endpoints  
-lightweight_endpoints = {
-    "/api/v1/users/me": {"limit": 1000, "period": 3600},     # Profile access
-    "/api/v1/posts": {"limit": 300, "period": 3600},         # Content browsing
-    "/api/v1/search": {"limit": 500, "period": 3600},        # Search queries
-}
-```
+The implementation uses a fixed-window counter (TTL on first increment). At the boundary between windows, a user can technically make `2 × limit` requests in a short span. For most use cases this is fine; if you need stricter sliding-window semantics, build that on top of the provider yourself.
 
-### Production Considerations
+### Anonymous-user limits
 
-```python
-# Use separate Redis database for rate limiting
-REDIS_RATE_LIMITER_DB=2  # Isolate from cache and queues
+IP-based rate limits are easy to bypass with NAT / proxies / IPv6 rotation. They're a speed bump, not security. If you're trying to prevent abuse rather than control fair use, you need authentication, captchas, or upstream firewall rules — not just rate limits.
 
-# Set appropriate Redis memory policies
-# maxmemory-policy volatile-lru  # Remove expired rate limit keys first
+## Troubleshooting
 
-# Monitor Redis memory usage
-# Rate limit keys can accumulate quickly under high load
+### "I added `Depends(check_rate_limit)` but no headers appear"
 
-# Consider rate limit key cleanup
-async def cleanup_expired_rate_limits():
-    """Clean up expired rate limit keys."""
-    pattern = "ratelimit:*"
-    keys = await redis_client.keys(pattern)
-    
-    for key in keys:
-        ttl = await redis_client.ttl(key)
-        if ttl == -2:  # Key expired but not cleaned up
-            await redis_client.delete(key)
-```
+- Confirm `RATE_LIMITER_ENABLED=true`
+- Confirm the rate limiter initialized cleanly at startup (look for `Cache backend not available` or similar)
+- Confirm the dependency runs **before** the response is built (it does, by virtue of being a dependency — but if you're seeing an empty body the route may have errored earlier)
 
-### Security Considerations
+### "All requests look anonymous even though users are logged in"
 
-```python
-# Rate limit by IP for unauthenticated users
-if not user:
-    user_id = request.client.host if request.client else "unknown"
-    limit, period = DEFAULT_LIMIT, DEFAULT_PERIOD
+`request.state.user` isn't being populated. Either implement the bridge middleware shown above, or accept that the rate limiter operates on IP only.
 
-# Prevent rate limit enumeration attacks
-# Don't expose exact remaining requests in error messages
+### "Path lookups never find the rate-limit row"
 
-# Use progressive delays for repeated violations
-# Consider temporary bans for severe abuse
+Verify the `path` column in `rate_limits` matches the **sanitized** form (slashes replaced with underscores). The lookup tries sanitized first, then falls back to the original path — but keys in Redis always use the sanitized version, so configs should match.
 
-# Log rate limit violations for security monitoring
-if is_limited:
-    logger.warning(
-        f"Rate limit exceeded",
-        extra={
-            "user_id": user_id,
-            "path": path,
-            "ip": request.client.host if request.client else "unknown",
-            "user_agent": request.headers.get("user-agent")
-        }
-    )
-```
+### "The rate-limiter dependency raises `RateLimiterBackendException`"
 
-## Common Use Cases
+The Redis connection failed and `RATE_LIMITER_FAIL_OPEN=false`. Either fix Redis, switch to fail-open, or temporarily disable the limiter (`RATE_LIMITER_ENABLED=false`).
 
-### API Monetization
+## Key Files
 
-```python
-# Different tiers for different pricing levels
-tiers = {
-    "free": {"daily_requests": 1000, "cost": 0},
-    "starter": {"daily_requests": 10000, "cost": 29},
-    "professional": {"daily_requests": 100000, "cost": 99},
-    "enterprise": {"daily_requests": 1000000, "cost": 499}
-}
-```
+| Component             | Location                                                  |
+|-----------------------|-----------------------------------------------------------|
+| Middleware + dependency | `backend/src/infrastructure/rate_limit/middleware.py`   |
+| Provider API          | `backend/src/infrastructure/rate_limit/provider.py`       |
+| Backend implementations | `backend/src/infrastructure/rate_limit/backends/`       |
+| Path sanitization     | `backend/src/infrastructure/rate_limit/utils.py`          |
+| RateLimit model       | `backend/src/modules/rate_limit/models.py`                |
+| Rate-limit routes     | `backend/src/modules/rate_limit/routes.py`                |
+| Settings              | `backend/src/infrastructure/config/settings.py` (`RateLimiterSettings`) |
 
-### Resource Protection
+## Next Steps
 
-```python
-# Protect expensive operations
-@router.post("/ai/generate-image", dependencies=[Depends(rate_limiter_dependency)])
-async def generate_image():
-    """Expensive AI operation - heavily rate limited."""
-    pass
-
-@router.get("/data/export", dependencies=[Depends(rate_limiter_dependency)])  
-async def export_data():
-    """Database-intensive operation - rate limited."""
-    pass
-```
-
-### Abuse Prevention
-
-```python
-# Strict limits on user-generated content
-@router.post("/posts", dependencies=[Depends(rate_limiter_dependency)])
-async def create_post():
-    """Prevent spam posting."""
-    pass
-
-@router.post("/comments", dependencies=[Depends(rate_limiter_dependency)])
-async def create_comment():
-    """Prevent comment spam.""" 
-    pass
-```
-
-This comprehensive rate limiting system provides robust protection against API abuse while supporting flexible business models through user tiers and granular endpoint controls. 
+- **[Tiers](../authentication/permissions.md#tier-based-authorization)** — Setting up user tiers
+- **[Admin Panel → Adding Models](../admin-panel/adding-models.md)** — Adding a `RateLimitAdmin` view
+- **[Caching → Cache Strategies](../caching/cache-strategies.md)** — Patterns that share the same Redis-as-state mindset

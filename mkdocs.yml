@@ -41,7 +41,7 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
-          rendering:
+          options:
             show_source: true
 
 nav:
@@ -74,7 +74,7 @@ nav:
           - Versioning: user-guide/api/versioning.md
       - Authentication:
           - Overview: user-guide/authentication/index.md
-          - JWT Tokens: user-guide/authentication/jwt-tokens.md
+          - Sessions: user-guide/authentication/sessions.md
           - User Management: user-guide/authentication/user-management.md
           - Permissions: user-guide/authentication/permissions.md
       - Admin Panel:
@@ -92,6 +92,10 @@ nav:
       - Development: user-guide/development.md
       - Production: user-guide/production.md
       - Testing: user-guide/testing.md
+  - CLI:
+      - Overview: cli/index.md
+      - Commands: cli/commands.md
+      - Plugins: cli/plugins.md
   - Community: community.md
   # - Examples:
   #   - Overview: examples/index.md

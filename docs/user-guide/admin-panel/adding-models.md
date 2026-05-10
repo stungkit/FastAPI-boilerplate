@@ -1,480 +1,366 @@
-# Adding Models
+# Adding Models to the Admin
 
-Learn how to extend the admin interface with your new models by following the patterns established in the FastAPI boilerplate. The boilerplate already includes User, Tier, and Post models - we'll show you how to add your own models using these working examples.
+Adding your own models to the admin is straightforward, but there's one quirk to know upfront: the boilerplate's models use SQLAlchemy's `MappedAsDataclass`, which requires a special mixin to play nicely with SQLAdmin.
 
-> **CRUDAdmin Features**: This guide shows boilerplate-specific patterns. For advanced model configuration options and features, see the [CRUDAdmin documentation](https://benavlabs.github.io/crudadmin/).
+For the full range of options, see the [SQLAdmin documentation](https://aminalaee.dev/sqladmin/).
 
-## Understanding the Existing Setup
+## The DataclassModelMixin
 
-The boilerplate comes with three models already registered in the admin interface. Understanding how they're implemented will help you add your own models successfully.
+SQLAdmin's default insert flow creates an empty model instance, then sets attributes one by one. That breaks dataclass models with required fields that have no defaults.
 
-### Current Model Registration
-
-The admin interface is configured in `src/app/admin/views.py`:
+The boilerplate solves this with `DataclassModelMixin` (`backend/src/interfaces/admin/mixins.py`) — it constructs the model with all the form data at once.
 
 ```python
-def register_admin_views(admin: CRUDAdmin) -> None:
-    """Register all models and their schemas with the admin interface."""
-    
-    # User model with password handling
-    password_transformer = PasswordTransformer(
-        password_field="password",
-        hashed_field="hashed_password", 
-        hash_function=get_password_hash,
-        required_fields=["name", "username", "email"],
+from ..mixins import DataclassModelMixin
+
+class MyModelAdmin(DataclassModelMixin, ModelView, model=MyModel):
+    ...
+```
+
+**Every admin view in the codebase uses this mixin.** If you forget it, you'll get an `AttributeError` (or worse, a silent NULL) when creating records.
+
+## Adding a New Model View
+
+### 1. Create the View File
+
+```python
+# backend/src/interfaces/admin/views/widgets.py
+from sqladmin import ModelView
+
+from ....modules.widgets.models import Widget
+from ....modules.widgets.schemas import WidgetCreate, WidgetUpdate
+from ..mixins import DataclassModelMixin
+
+
+class WidgetAdmin(DataclassModelMixin, ModelView, model=Widget):
+    name = "Widget"
+    name_plural = "Widgets"
+    icon = "fa-solid fa-cube"
+    category = "Inventory"
+
+    # List view
+    column_list = [Widget.id, Widget.name, Widget.owner_id, Widget.created_at]
+    column_searchable_list = [Widget.name]
+    column_sortable_list = [Widget.id, Widget.name, Widget.created_at]
+    column_default_sort = [(Widget.id, True)]   # True = descending
+
+    # Detail view
+    column_details_list = "__all__"
+
+    # Forms — derived from your Pydantic schemas
+    form_create_rules = list(WidgetCreate.model_fields.keys())
+    form_edit_rules = list(WidgetUpdate.model_fields.keys())
+
+    # Permissions
+    can_create = True
+    can_edit = True
+    can_delete = True
+    can_view_details = True
+    can_export = True
+```
+
+### 2. Register It
+
+```python
+# backend/src/interfaces/admin/views/__init__.py
+from sqladmin import Admin
+
+from .tiers import TierAdmin
+from .users import UserAdmin
+from .widgets import WidgetAdmin   # new
+
+__all__ = [
+    "UserAdmin",
+    "TierAdmin",
+    "WidgetAdmin",                  # new
+    "register_admin_views",
+]
+
+
+def register_admin_views(admin: Admin) -> None:
+    admin.add_view(UserAdmin)
+    admin.add_view(TierAdmin)
+    admin.add_view(WidgetAdmin)     # new
+```
+
+That's it — restart the app and Widgets show up in the sidebar under the "Inventory" category.
+
+## Configuration Options
+
+### Column Display
+
+```python
+column_list = [MyModel.id, MyModel.name, MyModel.status]
+column_labels = {
+    "hashed_password": "Password",  # rename a column header
+}
+```
+
+The boilerplate's `UserAdmin` uses `column_labels` to render `hashed_password` as just "Password" — the actual hashing happens in `on_model_change`.
+
+### Search and Sort
+
+```python
+column_searchable_list = [MyModel.name, MyModel.email]
+column_sortable_list = [MyModel.id, MyModel.created_at]
+column_default_sort = [(MyModel.created_at, True)]   # True = descending
+```
+
+### Form Rules
+
+Use your Pydantic schemas to drive form fields — keeps the admin forms aligned with your API validation:
+
+```python
+form_create_rules = list(MyModelCreate.model_fields.keys())
+form_edit_rules = list(MyModelUpdate.model_fields.keys())
+```
+
+You can also write the list explicitly if you want a different order or to include FK columns (more on that below).
+
+## Foreign Keys and Relationships
+
+The boilerplate's models use a **dual pattern**: foreign-key columns for database operations and relationships for SQLAdmin display.
+
+### The Model Pattern
+
+Every model that has a foreign key also defines the corresponding relationship:
+
+```python
+# modules/widgets/models.py
+
+from typing import TYPE_CHECKING
+from sqlalchemy import ForeignKey, Integer
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from ...infrastructure.database.session import Base
+
+if TYPE_CHECKING:
+    from ..user.models import User
+
+
+class Widget(Base, ...):
+    __tablename__ = "widgets"
+    ...
+
+    # Foreign-key column — used by FastCRUD and DB constraints
+    owner_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("user.id"), index=True,
     )
-    
-    admin.add_view(
-        model=User,
-        create_schema=UserCreate,
-        update_schema=UserUpdate,
-        allowed_actions={"view", "create", "update"},
-        password_transformer=password_transformer,
-    )
 
-    admin.add_view(
-        model=Tier,
-        create_schema=TierCreate,
-        update_schema=TierUpdate,
-        allowed_actions={"view", "create", "update", "delete"}
-    )
-
-    admin.add_view(
-        model=Post,
-        create_schema=PostCreateAdmin,  # Special admin-only schema
-        update_schema=PostUpdate,
-        allowed_actions={"view", "create", "update", "delete"}
+    # Relationship — used by SQLAdmin for display and form dropdowns.
+    # Required: lazy="selectin" (async) and init=False (excluded from dataclass __init__)
+    owner: Mapped["User"] = relationship(
+        "User", lazy="selectin", init=False,
     )
 ```
 
-Each model registration follows the same pattern: specify the SQLAlchemy model, appropriate Pydantic schemas for create/update operations, and define which actions are allowed.
+### Why Both?
 
-## Step-by-Step Model Addition
+- **FastCRUD** works with FK columns directly and returns dicts: `widget["owner_id"]`
+- **SQLAdmin** uses the relationship to render a friendly dropdown showing the related object's `__repr__` instead of a raw integer
 
-Let's walk through adding a new model to your admin interface using a product catalog example.
-
-### Step 1: Create Your Model
-
-First, create your SQLAlchemy model following the boilerplate's patterns:
+### `column_list` Uses the Relationship
 
 ```python
-# src/app/models/product.py
-from decimal import Decimal
-from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import String, Numeric, ForeignKey, Text, Boolean
-from sqlalchemy.types import DateTime
-from datetime import datetime
-
-from ..core.db.database import Base
-
-class Product(Base):
-    __tablename__ = "products"
-    
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    
-    # Foreign key relationship (similar to Post.created_by_user_id)
-    category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"))
+class WidgetAdmin(DataclassModelMixin, ModelView, model=Widget):
+    # Use Widget.owner (relationship), not Widget.owner_id (FK column).
+    # This shows "user@example.com" instead of just an integer.
+    column_list = [Widget.id, Widget.name, Widget.owner, Widget.created_at]
 ```
 
-### Step 2: Create Pydantic Schemas
-
-Create schemas for the admin interface following the boilerplate's pattern:
+The boilerplate's `UserAdmin` does this for tier:
 
 ```python
-# src/app/schemas/product.py
-from decimal import Decimal
-from pydantic import BaseModel, Field
-from typing import Annotated
-
-class ProductCreate(BaseModel):
-    name: Annotated[str, Field(min_length=2, max_length=100)]
-    description: Annotated[str | None, Field(max_length=1000, default=None)]
-    price: Annotated[Decimal, Field(gt=0, le=999999.99)]
-    is_active: Annotated[bool, Field(default=True)]
-    category_id: Annotated[int, Field(gt=0)]
-
-class ProductUpdate(BaseModel):
-    name: Annotated[str | None, Field(min_length=2, max_length=100, default=None)]
-    description: Annotated[str | None, Field(max_length=1000, default=None)]
-    price: Annotated[Decimal | None, Field(gt=0, le=999999.99, default=None)]
-    is_active: Annotated[bool | None, Field(default=None)]
-    category_id: Annotated[int | None, Field(gt=0, default=None)]
+column_list = [User.id, User.name, User.username, User.email, User.is_superuser, User.tier]
 ```
 
-### Step 3: Register with Admin Interface
+`User.tier` is the relationship, not `User.tier_id`.
 
-Add your model to `src/app/admin/views.py`:
+### Form Rules Use FK Column Names
+
+For forms, include the **FK column name** (the underscore-id one) in your rules. SQLAdmin auto-generates a searchable dropdown:
 
 ```python
-# Add import at the top
-from ..models.product import Product
-from ..schemas.product import ProductCreate, ProductUpdate
+form_create_rules = [*WidgetCreate.model_fields.keys(), "owner_id"]
+```
 
-def register_admin_views(admin: CRUDAdmin) -> None:
-    """Register all models and their schemas with the admin interface."""
-    
-    # ... existing model registrations ...
-    
-    # Add your new model
-    admin.add_view(
-        model=Product,
-        create_schema=ProductCreate,
-        update_schema=ProductUpdate,
-        allowed_actions={"view", "create", "update", "delete"}
+### `lazy="selectin"` Is Required
+
+SQLAdmin runs in async context, so relationships must use `lazy="selectin"` to avoid lazy-loading errors. Symptom of forgetting: `MissingGreenlet` or `greenlet_spawn has not been called`. Both User and Tier models in the boilerplate already use this pattern.
+
+### Don't Set `default=None` on Relationships
+
+For nullable foreign keys, never set `default=None` on the relationship:
+
+```python
+# WRONG — SQLAlchemy clears the FK during commit
+tier: Mapped["Tier | None"] = relationship("Tier", default=None, init=False)
+
+# CORRECT — relationship returns None naturally when FK is null
+tier: Mapped["Tier | None"] = relationship("Tier", init=False)
+```
+
+The User model demonstrates the correct pattern.
+
+`DataclassModelMixin` automatically filters out relationship objects before constructing the dataclass — so the form data containing `owner_id=42` works, but a stray `owner=<User instance>` would be ignored.
+
+## Data Transformation Hooks
+
+### `on_model_change` — Transform Before Save
+
+Runs before insert and update. Use it to hash passwords, normalize fields, etc.
+
+```python
+from typing import Any
+from starlette.requests import Request
+
+
+class UserAdmin(DataclassModelMixin, ModelView, model=User):
+    async def on_model_change(
+        self,
+        data: dict[str, Any],
+        model: Any,
+        is_created: bool,
+        request: Request,
+    ) -> None:
+        if is_created and data.get("hashed_password"):
+            # Form's "Password" field maps to hashed_password column;
+            # hash the plaintext before the row is created
+            data["hashed_password"] = get_password_hash(data["hashed_password"])
+```
+
+`is_created` distinguishes create from update. For new records, `model` is `None`.
+
+### `after_model_change` — Side Effects After Save
+
+Runs after the record is committed. Useful for sending welcome emails, dispatching webhooks, etc.
+
+```python
+async def after_model_change(
+    self,
+    data: dict[str, Any],
+    model: Any,
+    is_created: bool,
+    request: Request,
+) -> None:
+    if is_created:
+        await notify_new_user(model)
+```
+
+### `delete_model` — Custom Delete Behavior
+
+Override when delete needs to do more than `DELETE FROM`. The boilerplate's `TierAdmin` uses this to call the tier service's `permanent_delete`, which validates that no users or rate limits still reference the tier:
+
+```python
+async def delete_model(self, request: Request, pk: str) -> None:
+    from ....modules.tier.crud import crud_tiers
+
+    async with local_session() as db:
+        tier_service = TierService()
+
+        tier = await crud_tiers.get(db=db, id=int(pk))
+        if not tier:
+            raise ValueError(f"Tier with ID {pk} not found")
+
+        await tier_service.permanent_delete(tier["name"], db)
+```
+
+## Bulk Actions
+
+Bulk actions let admins select multiple records and operate on them at once. Use the `@action` decorator:
+
+```python
+from sqladmin import action
+from starlette.requests import Request
+from starlette.responses import RedirectResponse
+
+
+class WidgetAdmin(DataclassModelMixin, ModelView, model=Widget):
+    @action(
+        name="deactivate",
+        label="Deactivate Selected",
+        confirmation_message="Deactivate these widgets?",
+        add_in_list=True,
     )
+    async def action_deactivate(self, request: Request) -> RedirectResponse:
+        pks = request.query_params.get("pks", "").split(",")
+        if pks and pks[0]:
+            ids = [int(pk) for pk in pks]
+            async with local_session() as db:
+                await crud_widgets.update(
+                    db=db,
+                    object={"is_active": False},
+                    allow_multiple=True,
+                    id__in=ids,
+                )
+                await db.commit()
+
+        referer = request.headers.get("Referer")
+        return RedirectResponse(referer or request.url_for("admin:list", identity=self.identity))
 ```
 
-### Step 4: Create and Run Migration
+Notes:
 
-Generate the database migration for your new model:
+- Selected IDs come from `request.query_params["pks"]` as a comma-separated string
+- `local_session()` is the boilerplate's session-maker — import it from `infrastructure/database/session.py`
+- Always commit before redirecting, otherwise the change reverts when the request ends
 
-```bash
-# Generate migration
-uv run alembic revision --autogenerate -m "Add product model"
+## Icons
 
-# Apply migration
-uv run alembic upgrade head
-```
-
-### Step 5: Test Your New Model
-
-Start your application and test the new model in the admin interface:
-
-```bash
-# Start the application
-uv run fastapi dev
-
-# Visit http://localhost:8000/admin
-# Login with your admin credentials
-# You should see "Products" in the admin navigation
-```
-
-## Learning from Existing Models
-
-Each model in the boilerplate demonstrates different admin interface patterns you can follow.
-
-### User Model - Password Handling
-
-The User model shows how to handle sensitive fields like passwords:
+SQLAdmin uses [Font Awesome](https://fontawesome.com/icons) icons. Set them with `icon`:
 
 ```python
-# Password transformer for secure password handling
-password_transformer = PasswordTransformer(
-    password_field="password",         # Field in the schema
-    hashed_field="hashed_password",    # Field in the database model  
-    hash_function=get_password_hash,   # Your app's hash function
-    required_fields=["name", "username", "email"],  # Fields required for user creation
-)
-
-admin.add_view(
-    model=User,
-    create_schema=UserCreate,
-    update_schema=UserUpdate,
-    allowed_actions={"view", "create", "update"},  # No delete for users
-    password_transformer=password_transformer,
-)
+icon = "fa-solid fa-user"          # users
+icon = "fa-solid fa-layer-group"   # tiers / categories
+icon = "fa-solid fa-key"           # api keys
+icon = "fa-solid fa-gauge-high"    # rate limits
+icon = "fa-solid fa-cube"          # generic
 ```
 
-**When to use this pattern:**
+## Categories
 
-- Models with password fields
-- Any field that needs transformation before storage
-- Fields requiring special security handling
-
-### Tier Model - Simple CRUD
-
-The Tier model demonstrates straightforward CRUD operations:
+Group related views together with `category`:
 
 ```python
-admin.add_view(
-    model=Tier,
-    create_schema=TierCreate,
-    update_schema=TierUpdate,
-    allowed_actions={"view", "create", "update", "delete"}  # Full CRUD
-)
+class WidgetAdmin(...):
+    category = "Inventory"
 ```
 
-**When to use this pattern:**
+Views with the same category appear under the same sidebar header. The boilerplate's existing views use `"Users & Access"`.
 
-- Reference data (categories, types, statuses)
-- Configuration models
-- Simple data without complex relationships
+## Soft Delete vs Hard Delete
 
-### Post Model - Admin-Specific Schemas
-
-The Post model shows how to create admin-specific schemas when the regular API schemas don't work for admin purposes:
+Models that mix in `SoftDeleteMixin` have `is_deleted` and `deleted_at` columns. SQLAdmin's default delete is a hard `DELETE FROM` — if you want soft-deletion behavior, override `delete_model`:
 
 ```python
-# Special admin schema (different from regular PostCreate)
-class PostCreateAdmin(BaseModel):
-    title: Annotated[str, Field(min_length=2, max_length=30)]
-    text: Annotated[str, Field(min_length=1, max_length=63206)]
-    created_by_user_id: int  # Required in admin, but not in API
-    media_url: Annotated[str | None, Field(pattern=r"^(https?|ftp)://[^\s/$.?#].[^\s]*$", default=None)]
-
-admin.add_view(
-    model=Post,
-    create_schema=PostCreateAdmin,  # Admin-specific schema
-    update_schema=PostUpdate,       # Regular update schema works fine
-    allowed_actions={"view", "create", "update", "delete"}
-)
+async def delete_model(self, request: Request, pk: str) -> None:
+    async with local_session() as db:
+        await crud_widgets.delete(db=db, id=int(pk))   # FastCRUD soft-deletes via the mixin
+        await db.commit()
 ```
 
-**When to use this pattern:**
+Most of the time you actually want a hard delete here (the admin is editing the canonical row, not making a user-visible deletion), but be deliberate about which behavior you want.
 
-- Models where admins need to set fields that users can't
-- Models requiring additional validation for admin operations
-- Cases where API schemas are too restrictive or too permissive for admin use
+## Real Examples in the Codebase
 
-## Advanced Model Configuration
+The boilerplate ships two admin views — read them as reference implementations:
 
-### Customizing Field Display
+| File | What it shows |
+|------|---------------|
+| `backend/src/interfaces/admin/views/users.py` | `on_model_change` for password hashing, OAuth-provider select field, relationship in `column_list`, custom `column_labels` |
+| `backend/src/interfaces/admin/views/tiers.py` | `delete_model` override that calls a service method, schema-driven form rules |
 
-You can control how fields appear in the admin interface by modifying your schemas:
+## Key Files
 
-```python
-class ProductCreateAdmin(BaseModel):
-    name: Annotated[str, Field(
-        min_length=2, 
-        max_length=100,
-        description="Product name as shown to customers"
-    )]
-    description: Annotated[str | None, Field(
-        max_length=1000,
-        description="Detailed product description (supports HTML)"
-    )]
-    price: Annotated[Decimal, Field(
-        gt=0, 
-        le=999999.99,
-        description="Price in USD (up to 2 decimal places)"
-    )]
-    category_id: Annotated[int, Field(
-        gt=0,
-        description="Product category (creates dropdown automatically)"
-    )]
-```
+| Component | Location |
+|-----------|----------|
+| Dataclass mixin | `backend/src/interfaces/admin/mixins.py` |
+| View registry | `backend/src/interfaces/admin/views/__init__.py` |
+| Example views | `backend/src/interfaces/admin/views/*.py` |
+| Auth backend | `backend/src/interfaces/admin/auth.py` |
 
-### Restricting Actions
+## Next Steps
 
-Control what operations are available for each model:
-
-```python
-# Read-only model (reports, logs, etc.)
-admin.add_view(
-    model=AuditLog,
-    create_schema=None,  # No creation allowed
-    update_schema=None,  # No updates allowed
-    allowed_actions={"view"}  # Only viewing
-)
-
-# No deletion allowed (users, critical data)
-admin.add_view(
-    model=User,
-    create_schema=UserCreate,
-    update_schema=UserUpdate,
-    allowed_actions={"view", "create", "update"}  # No delete
-)
-```
-
-### Handling Complex Fields
-
-Some models may have fields that don't work well in the admin interface. Use select schemas to exclude problematic fields:
-
-```python
-from pydantic import BaseModel
-
-# Create a simplified view schema
-class ProductAdminView(BaseModel):
-    id: int
-    name: str
-    price: Decimal
-    is_active: bool
-    # Exclude complex fields like large text or binary data
-
-admin.add_view(
-    model=Product,
-    create_schema=ProductCreate,
-    update_schema=ProductUpdate,
-    select_schema=ProductAdminView,  # Controls what's shown in lists
-    allowed_actions={"view", "create", "update", "delete"}
-)
-```
-
-## Common Model Patterns
-
-### Reference Data Models
-
-For categories, types, and other reference data:
-
-```python
-# Simple reference model
-class Category(Base):
-    __tablename__ = "categories"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(50), unique=True)
-    description: Mapped[str | None] = mapped_column(Text)
-
-# Simple schemas
-class CategoryCreate(BaseModel):
-    name: str = Field(..., min_length=2, max_length=50)
-    description: str | None = None
-
-# Registration
-admin.add_view(
-    model=Category,
-    create_schema=CategoryCreate,
-    update_schema=CategoryCreate,  # Same schema for create and update
-    allowed_actions={"view", "create", "update", "delete"}
-)
-```
-
-### User-Generated Content
-
-For content models with user associations:
-
-```python
-class BlogPost(Base):
-    __tablename__ = "blog_posts"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    title: Mapped[str] = mapped_column(String(200))
-    content: Mapped[str] = mapped_column(Text)
-    author_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    published_at: Mapped[datetime | None] = mapped_column(DateTime)
-
-# Admin schema with required author
-class BlogPostCreateAdmin(BaseModel):
-    title: str = Field(..., min_length=5, max_length=200)
-    content: str = Field(..., min_length=10)
-    author_id: int = Field(..., gt=0)  # Admin must specify author
-    published_at: datetime | None = None
-
-admin.add_view(
-    model=BlogPost,
-    create_schema=BlogPostCreateAdmin,
-    update_schema=BlogPostUpdate,
-    allowed_actions={"view", "create", "update", "delete"}
-)
-```
-
-### Configuration Models
-
-For application settings and configuration:
-
-```python
-class SystemSetting(Base):
-    __tablename__ = "system_settings"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    key: Mapped[str] = mapped_column(String(100), unique=True)
-    value: Mapped[str] = mapped_column(Text)
-    description: Mapped[str | None] = mapped_column(Text)
-
-# Restricted actions - settings shouldn't be deleted
-admin.add_view(
-    model=SystemSetting,
-    create_schema=SystemSettingCreate,
-    update_schema=SystemSettingUpdate,
-    allowed_actions={"view", "create", "update"}  # No delete
-)
-```
-
-## Testing Your Models
-
-After adding models to the admin interface, test them thoroughly:
-
-### Manual Testing
-
-1. **Access**: Navigate to `/admin` and log in
-2. **Create**: Try creating new records with valid and invalid data
-3. **Edit**: Test updating existing records
-4. **Validation**: Verify that your schema validation works correctly
-5. **Relationships**: Test foreign key relationships (dropdowns should populate)
-
-### Development Testing
-
-```python
-# Test your admin configuration
-# src/scripts/test_admin.py
-from app.admin.initialize import create_admin_interface
-
-def test_admin_setup():
-    admin = create_admin_interface()
-    if admin:
-        print("Admin interface created successfully")
-        print(f"Models registered: {len(admin._views)}")
-        for model_name in admin._views:
-            print(f"  - {model_name}")
-    else:
-        print("Admin interface disabled")
-
-if __name__ == "__main__":
-    test_admin_setup()
-```
-
-```bash
-# Run the test
-uv run python src/scripts/test_admin.py
-```
-
-## Updating Model Registration
-
-When you need to modify how existing models appear in the admin interface:
-
-### Adding Actions
-
-```python
-# Enable deletion for a model that previously didn't allow it
-admin.add_view(
-    model=Product,
-    create_schema=ProductCreate,
-    update_schema=ProductUpdate,
-    allowed_actions={"view", "create", "update", "delete"}  # Added delete
-)
-```
-
-### Changing Schemas
-
-```python
-# Switch to admin-specific schemas
-admin.add_view(
-    model=User,
-    create_schema=UserCreateAdmin,    # New admin schema
-    update_schema=UserUpdateAdmin,    # New admin schema  
-    allowed_actions={"view", "create", "update"},
-    password_transformer=password_transformer,
-)
-```
-
-### Performance Optimization
-
-For models with many records, consider using select schemas to limit data:
-
-```python
-# Only show essential fields in lists
-class UserListView(BaseModel):
-    id: int
-    username: str
-    email: str
-    is_active: bool
-
-admin.add_view(
-    model=User,
-    create_schema=UserCreate,
-    update_schema=UserUpdate,
-    select_schema=UserListView,  # Faster list loading
-    allowed_actions={"view", "create", "update"},
-    password_transformer=password_transformer,
-)
-```
-
-## What's Next
-
-With your models successfully added to the admin interface, you're ready to:
-
-1. **[User Management](user-management.md)** - Learn how to manage admin users and implement security best practices
-
-Your models are now fully integrated into the admin interface and ready for production use. The admin panel will automatically handle form generation, validation, and database operations based on your model and schema definitions. 
+- **[User Management](user-management.md)** — Hardening admin authentication
+- **[Models](../database/models.md)** — Defining the SQLAlchemy models that admin views render
+- **[Schemas](../database/schemas.md)** — Pydantic schemas used for form rules

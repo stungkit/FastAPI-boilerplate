@@ -1,418 +1,333 @@
 # API Versioning
 
-Learn how to version your APIs properly using the boilerplate's built-in versioning structure and best practices for maintaining backward compatibility.
+The boilerplate ships a `v1` namespace under `/api/v1/`. This page documents the actual wiring and how to add `/api/v2/` when you need to make breaking changes.
 
-## Quick Start
-
-The boilerplate is already set up for versioning with a `v1` structure:
+## How It's Wired Today
 
 ```text
-src/app/api/
-├── dependencies.py          # Shared across all versions
-└── v1/                     # Version 1 of your API
-    ├── __init__.py         # Router registration
-    ├── users.py           # User endpoints
-    ├── posts.py           # Post endpoints
-    └── ...                # Other endpoints
+backend/src/interfaces/api/
+├── __init__.py            # mounts /api → v1
+└── v1/
+    └── __init__.py        # mounts /v1 + each module's router
 ```
 
-Your endpoints are automatically available at `/api/v1/...`:
-
-- `GET /api/v1/users/` - Get users
-- `POST /api/v1/users/` - Create user
-- `GET /api/v1/posts/` - Get posts
-
-## Current Structure
-
-### Version 1 (v1)
-
-The current API version is in `src/app/api/v1/`:
+`interfaces/api/__init__.py`:
 
 ```python
-# src/app/api/v1/__init__.py
 from fastapi import APIRouter
 
-from .users import router as users_router
-from .posts import router as posts_router
-from .login import router as login_router
+from .v1 import router as v1_router
 
-# Main v1 router
-api_router = APIRouter()
-
-# Include all v1 endpoints
-api_router.include_router(users_router)
-api_router.include_router(posts_router)
-api_router.include_router(login_router)
+router = APIRouter(prefix="/api")
+router.include_router(v1_router)
 ```
 
-### Main App Registration
-
-In `src/app/main.py`, v1 is registered:
+`interfaces/api/v1/__init__.py`:
 
 ```python
-from fastapi import FastAPI
-from app.api.v1 import api_router as api_v1_router
-
-app = FastAPI()
-
-# Register v1 API
-app.include_router(api_v1_router, prefix="/api/v1")
-```
-
-## Adding Version 2
-
-When you need to make breaking changes, create a new version:
-
-### Step 1: Create v2 Directory
-
-```text
-src/app/api/
-├── dependencies.py
-├── v1/                     # Keep v1 unchanged
-│   ├── __init__.py
-│   ├── users.py
-│   └── ...
-└── v2/                     # New version
-    ├── __init__.py
-    ├── users.py           # Updated user endpoints
-    └── ...
-```
-
-### Step 2: Create v2 Router
-
-```python
-# src/app/api/v2/__init__.py
 from fastapi import APIRouter
 
-from .users import router as users_router
-# Import other v2 routers
+from ....infrastructure.auth.routes import router as auth_router
+from ....modules.api_keys.routes import router as api_keys_router
+from ....modules.rate_limit.routes import router as rate_limits_router
+from ....modules.tier.routes import router as tiers_router
+from ....modules.user.routes import router as users_router
 
-# Main v2 router
-api_router = APIRouter()
-
-# Include v2 endpoints
-api_router.include_router(users_router)
+router = APIRouter(prefix="/v1")
+router.include_router(users_router, prefix="/users")
+router.include_router(tiers_router, prefix="/tiers")
+router.include_router(rate_limits_router, prefix="/rate-limits")
+router.include_router(auth_router, prefix="/auth")
+router.include_router(api_keys_router, prefix="/api-keys")
 ```
 
-### Step 3: Register v2 in Main App
+The aggregator is the **only** place that knows about every module's router. Each module exposes a single `router` from its `routes.py`, and v1 mounts them all under their respective prefixes.
+
+`infrastructure/main.py` then mounts the API tree:
 
 ```python
-# src/app/main.py
-from fastapi import FastAPI
-from app.api.v1 import api_router as api_v1_router
-from app.api.v2 import api_router as api_v2_router
+from ..interfaces.api import router
 
-app = FastAPI()
-
-# Register both versions
-app.include_router(api_v1_router, prefix="/api/v1")
-app.include_router(api_v2_router, prefix="/api/v2")
+app.include_router(router)
 ```
 
-## Version 2 Example
+So `users_router → /users → /v1/users → /api/v1/users → /api/v1/users/me`, etc.
 
-Here's how you might evolve the user endpoints in v2:
+## Endpoints Today
 
-### v1 User Endpoint
-```python
-# src/app/api/v1/users.py
-from app.schemas.user import UserRead, UserCreate
+| URL prefix | Source |
+|------------|--------|
+| `/api/v1/users/*` | `modules/user/routes.py` |
+| `/api/v1/tiers/*` | `modules/tier/routes.py` |
+| `/api/v1/rate-limits/*` | `modules/rate_limit/routes.py` |
+| `/api/v1/auth/*` | `infrastructure/auth/routes.py` |
+| `/api/v1/api-keys/*` | `modules/api_keys/routes.py` |
 
-@router.get("/", response_model=list[UserRead])
-async def get_users():
-    users = await crud_users.get_multi(db=db, schema_to_select=UserRead)
-    return users["data"]
+## Adding `v2`
 
-@router.post("/", response_model=UserRead)
-async def create_user(user_data: UserCreate):
-    return await crud_users.create(db=db, object=user_data)
+When you need to make breaking changes — new response shapes, removed fields, different auth requirements — add a new version sibling instead of mutating v1.
+
+### Step 1: Create the v2 Aggregator
+
+```bash
+mkdir backend/src/interfaces/api/v2
+touch backend/src/interfaces/api/v2/__init__.py
 ```
 
-### v2 User Endpoint (with breaking changes)
 ```python
-# src/app/api/v2/users.py
-from app.schemas.user import UserReadV2, UserCreateV2  # New schemas
-from fastcrud import PaginatedListResponse
+# backend/src/interfaces/api/v2/__init__.py
+from fastapi import APIRouter
 
-# Breaking change: Always return paginated response
+# Import the v2-flavored route modules — see Step 2 below
+from ....modules.user.routes_v2 import router as users_router
+
+router = APIRouter(prefix="/v2")
+router.include_router(users_router, prefix="/users")
+
+# Re-export anything that didn't change in v2 from v1:
+# from ....modules.tier.routes import router as tiers_router
+# router.include_router(tiers_router, prefix="/tiers")
+```
+
+### Step 2: Create v2 Routes Per Module
+
+Two patterns work, pick the one that fits the change:
+
+**Pattern A: a separate `routes_v2.py`** — when v2's routes are different enough that mixing them in `routes.py` would be confusing.
+
+```python
+# backend/src/modules/user/routes_v2.py
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ...infrastructure.auth.session.dependencies import get_current_user
+from ...infrastructure.database.session import async_session
+from .schemas_v2 import UserReadV2
+from .service import UserService
+from .routes import get_user_service  # reuse the service factory
+
+router = APIRouter(tags=["Users (v2)"])
+
+
+# v2 makes pagination mandatory and renames profile_image_url -> avatar_url
 @router.get("/", response_model=PaginatedListResponse[UserReadV2])
-async def get_users(page: int = 1, items_per_page: int = 10):
-    users = await crud_users.get_multi(
-        db=db,
-        offset=(page - 1) * items_per_page,
+async def list_users(
+    db: Annotated[AsyncSession, Depends(async_session)],
+    user_service: Annotated[UserService, Depends(get_user_service)],
+    page: int = 1,
+    items_per_page: int = 10,
+) -> dict[str, Any]:
+    result = await user_service.get_paginated_v2(
+        skip=compute_offset(page, items_per_page),
         limit=items_per_page,
-        schema_to_select=UserReadV2
+        db=db,
     )
-    return paginated_response(users, page, items_per_page)
-
-# Breaking change: Require authentication
-@router.post("/", response_model=UserReadV2)
-async def create_user(
-    user_data: UserCreateV2,
-    current_user: Annotated[dict, Depends(get_current_user)]  # Now required
-):
-    return await crud_users.create(db=db, object=user_data)
+    return paginated_response(crud_data=result, page=page, items_per_page=items_per_page)
 ```
+
+**Pattern B: alias the existing router** — when v2's behavior is identical and only the URL prefix needs to differ:
+
+```python
+# backend/src/interfaces/api/v2/__init__.py
+from ....modules.tier.routes import router as tiers_router
+
+router.include_router(tiers_router, prefix="/tiers")
+```
+
+### Step 3: Mount v2 Alongside v1
+
+```python
+# backend/src/interfaces/api/__init__.py
+from fastapi import APIRouter
+
+from .v1 import router as v1_router
+from .v2 import router as v2_router
+
+router = APIRouter(prefix="/api")
+router.include_router(v1_router)
+router.include_router(v2_router)
+```
+
+Both `/api/v1/users/` and `/api/v2/users/` are now live.
 
 ## Schema Versioning
 
-Create separate schemas for different versions:
+Keep v1 schemas exactly as they are; add v2 schemas in a new file. Never edit a v1 schema in a way that changes the wire format — that's the whole point of having a v2.
 
-### Version 1 Schema
 ```python
-# src/app/schemas/user.py (existing)
+# backend/src/modules/user/schemas.py — UNCHANGED
 class UserRead(BaseModel):
     id: int
     name: str
     username: str
-    email: str
+    email: EmailStr
     profile_image_url: str
     tier_id: int | None
+    is_superuser: bool = False
+    email_verified: bool = False
+    oauth_provider: str | None = None
 
-class UserCreate(BaseModel):
-    name: str
-    username: str
-    email: str
-    password: str
-```
 
-### Version 2 Schema (with changes)
-```python
-# src/app/schemas/user_v2.py (new file)
-from datetime import datetime
-
+# backend/src/modules/user/schemas_v2.py — NEW
 class UserReadV2(BaseModel):
     id: int
     name: str
     username: str
-    email: str
-    avatar_url: str          # Changed from profile_image_url
-    subscription_tier: str   # Changed from tier_id to string
-    created_at: datetime     # New field
-    is_verified: bool        # New field
-
-class UserCreateV2(BaseModel):
-    name: str
-    username: str
-    email: str
-    password: str
-    accept_terms: bool       # New required field
+    email: EmailStr
+    avatar_url: str                          # renamed from profile_image_url
+    subscription_tier: str | None            # changed from tier_id (int) to tier name
+    is_superuser: bool = False
+    email_verified: bool = False
+    created_at: datetime                     # newly exposed
 ```
 
-## Gradual Migration Strategy
+Service methods that produce the v2 shape live next to the v1 ones — `UserService.get_paginated` for v1, `UserService.get_paginated_v2` for v2 — so the service still owns the data assembly logic.
 
-### 1. Keep Both Versions Running
+## Sharing Code Across Versions
+
+The CRUD layer, services, and infrastructure are **shared**. Only the routes and schemas duplicate. That's the point — it's cheap to add a version because most of the codebase doesn't move.
+
+```text
+modules/user/
+├── models.py            ← shared
+├── crud.py              ← shared
+├── service.py           ← shared (add v2-shaped methods if needed)
+├── schemas.py           ← v1 schemas
+├── schemas_v2.py        ← v2 schemas
+├── routes.py            ← v1 routes
+└── routes_v2.py         ← v2 routes
+```
+
+## Deprecating a Version
+
+When v2 is ready and v1 should sunset:
+
+### 1. Add a deprecation header to v1 endpoints
 
 ```python
-# Both versions work simultaneously
-# v1: GET /api/v1/users/ -> list[UserRead]
-# v2: GET /api/v2/users/ -> PaginatedListResponse[UserReadV2]
+# Inside a v1 route handler
+@router.get("/", response_model=list[UserRead], deprecated=True)
+async def list_users(
+    response: Response,
+    ...,
+) -> list[dict[str, Any]]:
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Wed, 31 Dec 2025 00:00:00 GMT"
+    response.headers["Link"] = '</api/v2/users/>; rel="successor-version"'
+    return await ...
 ```
 
-### 2. Add Deprecation Warnings
+The `Deprecation`, `Sunset`, and `Link` headers come from the IETF [API Deprecation](https://datatracker.ietf.org/doc/html/rfc8594) drafts — clients with HTTP-aware tooling pick them up automatically.
+
+The `deprecated=True` flag also marks the endpoint in `/docs`.
+
+### 2. Track v1 usage
+
+If you have logging middleware or observability, slice request counts by `request.url.path.startswith("/api/v1/")` to know when v1 traffic is low enough to retire.
+
+### 3. Remove v1 after sunset
+
+When the sunset date passes and traffic is gone:
+
+1. Delete `interfaces/api/v1/`
+2. Delete the v1-only `schemas.py` blocks (or rename `schemas_v2.py` → `schemas.py`)
+3. Delete v1-only service methods
+4. Update `interfaces/api/__init__.py` to mount only v2
+
+## Per-Version OpenAPI Documentation
+
+By default, `/docs` shows every route. To split docs per version, mount each version as a sub-app with its own `FastAPI()` instance:
 
 ```python
-# src/app/api/v1/users.py
-import warnings
-from fastapi import HTTPException
+# backend/src/interfaces/main.py — sketch
+from fastapi import FastAPI
 
-@router.get("/", response_model=list[UserRead])
-async def get_users(response: Response):
-    # Add deprecation header
-    response.headers["X-API-Deprecation"] = "v1 is deprecated. Use v2."
-    response.headers["X-API-Sunset"] = "2024-12-31"  # When v1 will be removed
-    
-    users = await crud_users.get_multi(db=db, schema_to_select=UserRead)
-    return users["data"]
+from .api.v1 import router as v1_router
+from .api.v2 import router as v2_router
+
+main = FastAPI(title="My API")
+
+v1 = FastAPI(title="My API v1", version="1.0.0")
+v1.include_router(v1_router)
+main.mount("/api/v1", v1)
+
+v2 = FastAPI(title="My API v2", version="2.0.0")
+v2.include_router(v2_router)
+main.mount("/api/v2", v2)
 ```
 
-### 3. Monitor Usage
-
-Track which versions are being used:
-
-```python
-# src/app/api/middleware.py
-from fastapi import Request
-import logging
-
-logger = logging.getLogger(__name__)
-
-async def version_tracking_middleware(request: Request, call_next):
-    if request.url.path.startswith("/api/v1/"):
-        logger.info(f"v1 usage: {request.method} {request.url.path}")
-    elif request.url.path.startswith("/api/v2/"):
-        logger.info(f"v2 usage: {request.method} {request.url.path}")
-    
-    response = await call_next(request)
-    return response
-```
-
-## Shared Code Between Versions
-
-Keep common logic in shared modules:
-
-### Shared Dependencies
-```python
-# src/app/api/dependencies.py - shared across all versions
-async def get_current_user(...):
-    # Authentication logic used by all versions
-    pass
-
-async def get_db():
-    # Database connection used by all versions
-    pass
-```
-
-### Shared CRUD Operations
-```python
-# The CRUD layer can be shared between versions
-# Only the schemas and endpoints change
-
-# v1 endpoint
-@router.get("/", response_model=list[UserRead])
-async def get_users_v1():
-    users = await crud_users.get_multi(schema_to_select=UserRead)
-    return users["data"]
-
-# v2 endpoint  
-@router.get("/", response_model=PaginatedListResponse[UserReadV2])
-async def get_users_v2():
-    users = await crud_users.get_multi(schema_to_select=UserReadV2)
-    return paginated_response(users, page, items_per_page)
-```
-
-## Version Discovery
-
-Let clients discover available versions:
-
-```python
-# src/app/api/versions.py
-from fastapi import APIRouter
-
-router = APIRouter()
-
-@router.get("/versions")
-async def get_api_versions():
-    return {
-        "available_versions": ["v1", "v2"],
-        "current_version": "v2",
-        "deprecated_versions": [],
-        "sunset_dates": {
-            "v1": "2024-12-31"
-        }
-    }
-```
-
-Register it in main.py:
-```python
-# src/app/main.py
-from app.api.versions import router as versions_router
-
-app.include_router(versions_router, prefix="/api")
-# Now available at GET /api/versions
-```
+You'll get `/api/v1/docs` and `/api/v2/docs` independently. Note the boilerplate ships a single mounted app today — adopt this only when you genuinely need separate docs.
 
 ## Testing Multiple Versions
 
-Test both versions to ensure compatibility:
+Once v2 exists, run the test suite against both:
 
 ```python
-# tests/test_api_versioning.py
 import pytest
 from httpx import AsyncClient
 
+
 @pytest.mark.asyncio
-async def test_v1_users(client: AsyncClient):
-    """Test v1 returns simple list"""
-    response = await client.get("/api/v1/users/")
-    assert response.status_code == 200
-    
-    data = response.json()
-    assert isinstance(data, list)  # v1 returns list
+async def test_v1_users_returns_list(client: AsyncClient):
+    resp = await client.get("/api/v1/users/")
+    # whatever v1's contract is — list, paginated, etc.
+    assert resp.status_code in {200, 401, 403}
 
-@pytest.mark.asyncio  
-async def test_v2_users(client: AsyncClient):
-    """Test v2 returns paginated response"""
-    response = await client.get("/api/v2/users/")
-    assert response.status_code == 200
-    
-    data = response.json()
-    assert "data" in data  # v2 returns paginated response
-    assert "total_count" in data
-    assert "page" in data
+
+@pytest.mark.asyncio
+async def test_v2_users_paginated(client: AsyncClient):
+    resp = await client.get("/api/v2/users/")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "data" in body
+    assert "total_count" in body
+    assert "page" in body
 ```
-
-## OpenAPI Documentation
-
-Each version gets its own docs:
-
-```python
-# src/app/main.py
-from fastapi import FastAPI
-
-# Create separate apps for documentation
-v1_app = FastAPI(title="My API v1", version="1.0.0")
-v2_app = FastAPI(title="My API v2", version="2.0.0")
-
-# Register routes
-v1_app.include_router(api_v1_router)
-v2_app.include_router(api_v2_router)
-
-# Mount as sub-applications
-main_app = FastAPI()
-main_app.mount("/api/v1", v1_app)
-main_app.mount("/api/v2", v2_app)
-```
-
-Now you have separate documentation:
-- `/api/v1/docs` - v1 documentation
-- `/api/v2/docs` - v2 documentation
 
 ## Best Practices
 
-### 1. Semantic Versioning
+### What counts as a breaking change?
 
-- **v1.0** → **v1.1**: New features (backward compatible)
-- **v1.1** → **v2.0**: Breaking changes (new version)
+- Removing a field from a response
+- Renaming a field
+- Changing a field's type (e.g. `tier_id: int | None` → `tier_name: str`)
+- Tightening validation in a way that previously-valid input now fails
+- Adding a required request field
+- Changing default behavior (e.g. unpaginated → paginated)
+- Changing auth requirements
 
-### 2. Clear Migration Path
+If you're not making a breaking change, just add the new field/feature to v1.
 
-```python
-# Document what changed in v2
-"""
-API v2 Changes:
-- GET /users/ now returns paginated response instead of array
-- POST /users/ now requires authentication
-- UserRead.profile_image_url renamed to avatar_url
-- UserRead.tier_id changed to subscription_tier (string)
-- Added UserRead.created_at and is_verified fields
-- UserCreate now requires accept_terms field
-"""
+### Keep the URL pattern consistent
+
+Always `/api/v{number}/resource`. Don't get clever with version-in-headers schemes — URL versioning is unambiguous to humans and to caches.
+
+### Don't fork the service layer prematurely
+
+If v2 only changes the response shape, derive the v2 dict from the same service method via a small adapter; only fork the service when business logic actually differs.
+
+### Document changes in a changelog
+
+Tag the v2 release with the list of breaking changes:
+
+```markdown
+## API v2
+
+Breaking changes vs v1:
+- `GET /users/` now returns `PaginatedListResponse` instead of `list[UserRead]`
+- `UserRead.profile_image_url` renamed to `avatar_url`
+- `UserRead.tier_id` (int) replaced with `subscription_tier` (string)
+- `POST /users/` now requires authentication
+- `UserCreate` now requires `accept_terms: bool`
 ```
 
-### 3. Gradual Deprecation
-
-1. Release v2 alongside v1
-2. Add deprecation warnings to v1
-3. Set sunset date for v1
-4. Monitor v1 usage
-5. Remove v1 after sunset date
-
-### 4. Consistent Patterns
-
-Keep the same patterns across versions:
-
-- Same URL structure: `/api/v{number}/resource`
-- Same HTTP methods and status codes
-- Same authentication approach
-- Same error response format
+A short, blunt list helps consumers migrate.
 
 ## What's Next
 
-Now that you understand API versioning:
-
-- **[Database Migrations](../database/migrations.md)** - Handle database schema changes
-- **[Testing](../testing.md)** - Test multiple API versions
-- **[Production](../production.md)** - Deploy versioned APIs
-
-Proper versioning lets you evolve your API without breaking existing clients!
+- **[Database Migrations](../database/migrations.md)** — Schema changes that may motivate a new API version
+- **[Endpoints](endpoints.md)** — Patterns for routes
+- **[Schemas](../database/schemas.md)** — Versioned shapes
