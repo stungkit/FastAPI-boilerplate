@@ -42,8 +42,7 @@ dev = [
     "pytest-asyncio>=0.25.3",
     "pytest-mock>=3.14.0",
     "types-python-jose>=3.4.0.20250224",
-    "testcontainers>=4.10.0",
-    "testcontainers-postgres>=0.0.1rc1",
+    "testcontainers[postgres]>=4.10.0",
     "pytest-xdist[psutil]>=3.8.0",
 ]
 
