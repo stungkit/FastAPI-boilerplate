@@ -86,7 +86,7 @@ fastapi-boilerplate/
 ```bash
 git clone https://github.com/<you>/FastAPI-boilerplate
 cd FastAPI-boilerplate
-uv sync --all-extras                          # one venv at the root, both members installed
+uv sync --all-packages --all-extras           # one venv at the root, both members installed
 ```
 
 Generate a compose file for the deployment shape you want:

@@ -15,7 +15,7 @@ from ..mixins import DataclassModelMixin
 OAUTH_PROVIDER_CHOICES = [("", "None")] + [(p.value, p.value.title()) for p in OAuthProvider]
 
 
-class UserAdmin(DataclassModelMixin, ModelView, model=User):  # type: ignore[call-arg]
+class UserAdmin(DataclassModelMixin, ModelView, model=User):
     """Admin view for User model with password hashing."""
 
     name = "User"

@@ -185,7 +185,7 @@ class RedisBackend(RateLimiterBackend):
             True if the backend is available, False otherwise.
         """
         try:
-            result = await self.client.ping()
+            result = await self.client.ping()  # type: ignore[misc]
             return bool(result)
         except Exception as e:
             logger.error(f"Failed to ping Redis server: {e}")

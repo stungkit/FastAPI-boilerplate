@@ -114,7 +114,7 @@ For development on your host machine. You provide PostgreSQL and Redis yourself.
 2. **Install Python dependencies**:
 
     ```bash
-    uv sync --all-extras
+    uv sync --all-packages --all-extras
     ```
 
     This syncs the whole workspace — backend, CLI, and dev tools — into one `.venv/` at the repo root. From here on, `uv run <cmd>` works from any subdirectory.
@@ -186,7 +186,7 @@ For contributors and anyone modifying the boilerplate itself.
 2. **Install dev dependencies**:
 
     ```bash
-    uv sync --all-extras
+    uv sync --all-packages --all-extras
     ```
 
 3. **Set up pre-commit hooks** (from the repo root):
