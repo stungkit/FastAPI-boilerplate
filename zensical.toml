@@ -138,6 +138,9 @@ name = "FastAPI on PyPI"
 ]
 
 [[project.nav]]
+"Changelog" = "changelog.md"
+
+[[project.nav]]
 "Community" = "community.md"
 
 # ==============================================================================
