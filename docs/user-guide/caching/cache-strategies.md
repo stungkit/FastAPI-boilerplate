@@ -1,191 +1,385 @@
 # Cache Strategies
 
-Effective cache strategies balance performance gains with data consistency. This section covers invalidation patterns, cache warming, and optimization techniques for building robust caching systems.
+Caching is easy to add and easy to get wrong. This page collects the practical patterns the boilerplate supports — how to name keys, when to invalidate, how to layer TTLs against write patterns, and how to warm the cache without bolting on a separate scheduler.
 
-## Cache Invalidation Strategies
+All examples use the boilerplate's real APIs: the [`@cache` decorator](redis-cache.md) for endpoint-level caching, and the provider exports (`get`, `set`, `delete`, `delete_pattern`, `exists`, `clear`) from `src.infrastructure.cache` for everything else.
 
-Cache invalidation is one of the hardest problems in computer science. The boilerplate provides several strategies to handle different scenarios while maintaining data consistency.
+## Picking a Key Naming Scheme
 
-### Understanding Cache Invalidation
+The decorator generates keys as `{formatted_key_prefix}:{resource_id}`. Your job is to pick a `key_prefix` (and any `{kwarg}` placeholders) that:
 
-**Cache invalidation** ensures that cached data doesn't become stale when the underlying data changes. Poor invalidation leads to users seeing outdated information, while over-aggressive invalidation negates caching benefits.
+1. **Doesn't collide** with unrelated caches
+2. **Matches your invalidation surface** — if you'll wipe by user, include the user identifier
+3. **Reads cleanly** in `redis-cli KEYS '*'` while debugging
 
-### Basic Invalidation Patterns
-
-#### Time-Based Expiration (TTL)
-
-The simplest strategy relies on cache expiration times:
+Patterns the codebase encourages:
 
 ```python
-# Set different TTL based on data characteristics
-@cache(key_prefix="user_profile", expiration=3600)  # 1 hour for profiles
-@cache(key_prefix="post_content", expiration=1800)  # 30 min for posts
-@cache(key_prefix="live_stats", expiration=60)      # 1 min for live data
+# Simple resource by id
+@cache(key_prefix="widget", resource_id_name="widget_id")
+# → widget:42
+
+# Per-user list, paginated
+@cache(key_prefix="user_{user_id}_widgets:page_{page}:size_{items_per_page}",
+       resource_id_name="user_id")
+# → user_5_widgets:page_1:size_10:5
+
+# String IDs (usernames, slugs, hashed query strings)
+@cache(key_prefix="user", resource_id_name="username", resource_id_type=str)
+# → user:johndoe
+
+# Time-windowed analytics — bake the window into the prefix
+@cache(key_prefix="analytics_{user_id}_30d", resource_id_name="report_id")
+# → analytics_5_30d:summary
 ```
 
-**Pros:**
+**Avoid** prefixes that:
 
-- Simple to implement and understand
-- Guarantees cache freshness within TTL period
-- Works well for data with predictable change patterns
+- Use raw resource IDs as the prefix (`{post_id}_comments`) — collisions are silent
+- Include unbounded user input directly (`search:{raw_query}`) — hash long/free-text inputs first
+- Mix unrelated resources at the same level (`data:42`) — debug nightmare
 
-**Cons:**
+## Invalidation Strategies
 
-- May serve stale data until TTL expires
-- Difficult to optimize TTL for all scenarios
-- Cache miss storms when many keys expire simultaneously
+There are essentially three invalidation strategies you'll combine:
 
-#### Write-Through Invalidation
+### 1. TTL Only ("eventually correct")
 
-Automatically invalidate cache when data is modified:
+Just expire the cache; never invalidate explicitly.
 
 ```python
-@router.put("/posts/{post_id}")
+@cache(key_prefix="popular_widgets", expiration=300)  # 5 minutes
+async def get_popular(request: Request, ...):
+    ...
+```
+
+**When to use:** read-only or near-read-only data where 1–5 minutes of staleness is acceptable. Reference data (countries, tier definitions), aggregates (top-N lists), expensive computations whose inputs change rarely.
+
+**Don't use for:** anything a user just edited and expects to see immediately.
+
+### 2. Write-Through Invalidation ("strict consistency")
+
+Mutations on the same `(key_prefix, resource_id_name)` automatically delete the matching key. Add `to_invalidate_extra` for related caches:
+
+```python
+@router.patch("/{widget_id}")
 @cache(
-    key_prefix="post_cache",
-    resource_id_name="post_id",
+    key_prefix="widget",
+    resource_id_name="widget_id",
     to_invalidate_extra={
-        "user_posts": "{user_id}",           # User's post list
-        "category_posts": "{category_id}",   # Category post list
-        "recent_posts": "global"             # Global recent posts
-    }
+        "user_widgets": "owner_id",      # invalidate the owner's list
+        "widget_count": "global",        # invalidate the global counter
+    },
 )
-async def update_post(
+async def update_widget(
     request: Request,
-    post_id: int,
-    post_data: PostUpdate,
-    user_id: int,
-    category_id: int
-):
-    # Update triggers automatic cache invalidation
-    updated_post = await crud_posts.update(db=db, id=post_id, object=post_data)
-    return updated_post
+    widget_id: int,
+    owner_id: int,
+    ...,
+) -> dict[str, Any]:
+    return await widget_service.update(widget_id, values, db)
 ```
 
-**Pros:**
+The decorator deletes the keys **after** the handler returns successfully — failed mutations don't touch the cache.
 
-- Immediate consistency when data changes
-- No stale data served to users
-- Precise control over what gets invalidated
+**When to use:** mutations to a resource that's directly cached, plus a small fixed set of related caches (this user's list, the global count, etc).
 
-**Cons:**
+**Don't use for:** broad invalidations across many user-scoped lists — that's pattern-based territory.
 
-- More complex implementation
-- Can impact write performance
-- Risk of over-invalidation
+### 3. Pattern-Based Invalidation ("blast radius")
 
-### Advanced Invalidation Patterns
-
-#### Pattern-Based Invalidation
-
-Use Redis pattern matching for bulk invalidation:
+For wipes that touch many keys at once (paginated lists, search caches), use pattern matching:
 
 ```python
-@router.put("/users/{user_id}/profile")
+@router.delete("/{widget_id}")
 @cache(
-    key_prefix="user_profile",
-    resource_id_name="user_id",
+    key_prefix="widget",
+    resource_id_name="widget_id",
     pattern_to_invalidate_extra=[
-        "user_{user_id}_*",          # All user-related caches
-        "*_user_{user_id}_*",        # Caches containing this user
-        "leaderboard_*",             # Leaderboards might change
-        "search_users_*"             # User search results
-    ]
+        "user_{owner_id}_widgets:*",     # all paginated lists for this user
+        "widget_search:*",                # all search-result caches
+    ],
 )
-async def update_user_profile(request: Request, user_id: int, profile_data: ProfileUpdate):
-    await crud_users.update(db=db, id=user_id, object=profile_data)
-    return {"message": "Profile updated"}
+async def delete_widget(request: Request, widget_id: int, owner_id: int, ...) -> None:
+    await widget_service.delete(widget_id, db)
 ```
 
-**Pattern Examples:**
-```python
-# User-specific patterns
-"user_{user_id}_posts_*"        # All paginated post lists for user
-"user_{user_id}_*_cache"        # All cached data for user
-"*_following_{user_id}"          # All caches tracking this user's followers
+!!! warning "Memcached doesn't support patterns"
+    `pattern_to_invalidate_extra` raises `PatternMatchingNotSupportedError` when `CACHE_BACKEND=memcached`. The non-pattern delete still happens. Use Redis if you need pattern-based invalidation.
 
-# Content patterns  
-"posts_category_{category_id}_*" # All posts in category
-"comments_post_{post_id}_*"      # All comments for post
-"search_*_{query}"               # All search results for query
+**When to use:** paginated or filtered lists where you don't know how many keys exist, search-result caches, anything where the prefix is a stable namespace.
 
-# Time-based patterns
-"daily_stats_*"                  # All daily statistics
-"hourly_*"                       # All hourly data
-"temp_*"                         # Temporary cache entries
-```
+**Don't use for:** narrow invalidations — you're scanning Redis on every mutation, which is much more expensive than a single `DEL`.
 
-## Cache Warming Strategies
+## Combining the Three
 
-Cache warming proactively loads data into cache to avoid cache misses during peak usage.
-
-### Application Startup Warming
+Real services usually mix all three:
 
 ```python
-# core/startup.py
-async def warm_critical_caches():
-    """Warm up critical caches during application startup."""
-    
-    logger.info("Starting cache warming...")
-    
-    # Warm up reference data
-    await warm_reference_data()
-    
-    # Warm up popular content
-    await warm_popular_content()
-    
-    # Warm up user session data for active users
-    await warm_active_user_data()
-    
-    logger.info("Cache warming completed")
-
-async def warm_reference_data():
-    """Warm up reference data that rarely changes."""
-    
-    # Countries, currencies, timezones, etc.
-    reference_data = await crud_reference.get_all_countries()
-    for country in reference_data:
-        cache_key = f"country:{country['code']}"
-        await cache.client.set(cache_key, json.dumps(country), ex=86400)  # 24 hours
-    
-    # Categories
-    categories = await crud_categories.get_all()
-    await cache.client.set("all_categories", json.dumps(categories), ex=3600)
-
-async def warm_popular_content():
-    """Warm up frequently accessed content."""
-    
-    # Most viewed posts
-    popular_posts = await crud_posts.get_popular(limit=100)
-    for post in popular_posts:
-        cache_key = f"post_cache:{post['id']}"
-        await cache.client.set(cache_key, json.dumps(post), ex=1800)
-    
-    # Trending topics
-    trending = await crud_posts.get_trending_topics(limit=50)
-    await cache.client.set("trending_topics", json.dumps(trending), ex=600)
-
-async def warm_active_user_data():
-    """Warm up data for recently active users."""
-    
-    # Get users active in last 24 hours
-    active_users = await crud_users.get_recently_active(hours=24)
-    
-    for user in active_users:
-        # Warm user profile
-        profile_key = f"user_profile:{user['id']}"
-        await cache.client.set(profile_key, json.dumps(user), ex=3600)
-        
-        # Warm user's recent posts
-        user_posts = await crud_posts.get_user_posts(user['id'], limit=10)
-        posts_key = f"user_{user['id']}_posts:page_1"
-        await cache.client.set(posts_key, json.dumps(user_posts), ex=1800)
-
-# Add to startup events
-@app.on_event("startup")
-async def startup_event():
-    await create_redis_cache_pool()
-    await warm_critical_caches()
+@router.put("/{widget_id}")
+@cache(
+    key_prefix="widget",
+    resource_id_name="widget_id",
+    expiration=900,                                       # TTL fallback (15 min)
+    to_invalidate_extra={                                 # narrow related-key wipes
+        "widget_count": "global",
+    },
+    pattern_to_invalidate_extra=[                         # broad list wipes
+        "user_{owner_id}_widgets:*",
+        "widget_search:*",
+    ],
+)
+async def update_widget(request: Request, widget_id: int, owner_id: int, ...) -> dict[str, Any]:
+    return await widget_service.update(widget_id, values, db)
 ```
 
-These cache strategies provide a comprehensive approach to building performant, consistent caching systems that scale with your application's needs while maintaining data integrity. 
+The TTL is your safety net — even if you forget an invalidation, the cache self-heals within 15 minutes.
+
+## Cache Aside (Service-Layer Caching)
+
+The decorator covers route-level caching. For caching inside services or background tasks, use the provider API directly:
+
+```python
+from src.infrastructure.cache import get, set, delete
+
+KEY_TTL = 1800  # 30 minutes
+
+
+async def get_user_score(user_id: int, db: AsyncSession) -> int:
+    cache_key = f"user_score:{user_id}"
+
+    # Try the cache first
+    cached = await get(key=cache_key)
+    if cached is not None:
+        return int(cached)
+
+    # Miss — compute and store
+    score = await _compute_user_score(user_id, db)
+    await set(key=cache_key, value=score, expiration=KEY_TTL)
+    return score
+
+
+async def invalidate_user_score(user_id: int) -> None:
+    await delete(key=f"user_score:{user_id}")
+```
+
+Conventions:
+
+- **Always use the same key format** in both the read and the invalidate path — copy/paste mistakes here are the most common cause of "cache won't update"
+- **Compute first, write second.** Never `set` a value before you've successfully computed it; you'd cache an error.
+- **Use the same TTL across reads and refreshes** so behavior is predictable.
+
+## Cache Stampede Mitigation
+
+When a hot cache key expires, every concurrent request can hit the database before any of them writes the new value back — a stampede. Mitigations the boilerplate's stack supports:
+
+### Slightly Randomized TTLs
+
+Pick TTLs in a range, not a single value, so a thousand keys created at the same time don't expire in lockstep:
+
+```python
+import random
+
+ttl = 1800 + random.randint(-60, 60)  # 30 min ± 1 min
+await set(key=cache_key, value=payload, expiration=ttl)
+```
+
+This is enough for most workloads.
+
+### Refresh Ahead of Expiration
+
+Inside the service, decide based on a "soft" TTL whether to recompute opportunistically:
+
+```python
+SOFT_TTL = 1500  # 25 min — recompute eagerly past this
+HARD_TTL = 1800  # 30 min — fail-open beyond this
+
+async def get_payload(user_id: int) -> dict:
+    cache_key = f"user_payload:{user_id}"
+    payload = await get(key=cache_key)
+
+    if payload is not None and payload.get("computed_at", 0) > time.time() - SOFT_TTL:
+        return payload  # fresh enough
+
+    fresh = await _compute(user_id)
+    fresh["computed_at"] = time.time()
+    await set(key=cache_key, value=fresh, expiration=HARD_TTL)
+    return fresh
+```
+
+Past the soft TTL, the next request triggers a recompute even though the cache is still warm — the next concurrent request still gets the fresh value. This is enough to prevent stampedes for moderately hot keys.
+
+For genuinely hot keys (top trending list with 10k req/s), reach for a distributed lock (`SET key value NX EX 30`) inside the recompute path. The boilerplate doesn't ship one, but Redis primitives are sufficient.
+
+## Cache Warming
+
+Cache warming proactively populates the cache so the first user request after a deploy isn't a cold miss. Two reasonable places to do it in the boilerplate:
+
+### At Application Startup (in the lifespan)
+
+The boilerplate's `lifespan_factory` (in `infrastructure/app_factory.py`) is where the cache is initialized. Warming sits naturally just after that point — but only for genuinely **small** datasets (reference tables, tier definitions, top-N aggregates). Don't pull a million rows into Redis on every boot.
+
+The pattern, in your own `interfaces/main.py` setup:
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+from src.infrastructure.app_factory import lifespan_factory
+from src.infrastructure.cache import set
+from src.infrastructure.config.settings import get_settings
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    # Run the boilerplate's default lifespan first
+    base_lifespan = lifespan_factory(settings)
+    async with base_lifespan(app):
+        await _warm_reference_data()
+        yield
+
+
+async def _warm_reference_data():
+    # Small, slow-changing data — safe to warm at boot.
+    tiers = await _load_all_tiers()
+    for tier in tiers:
+        await set(key=f"tier:{tier['id']}", value=tier, expiration=86400)
+```
+
+Wire it by passing `lifespan=lifespan` to `create_application()`.
+
+### As a Taskiq Task
+
+For larger or periodic warming, use a Taskiq task on a schedule. See [Background Tasks](../background-tasks/index.md) for the worker setup; the warming logic is the same — fetch data, call `set()`.
+
+```python
+# backend/src/modules/cache/tasks.py
+from ...infrastructure.cache import set
+from ...infrastructure.taskiq import default_broker
+
+
+@default_broker.task(task_name="warm_top_widgets")
+async def warm_top_widgets() -> None:
+    top = await _query_top_widgets(limit=100)
+    await set(key="top_widgets", value=top, expiration=600)
+```
+
+Schedule it to run every 5 minutes (or whatever's shorter than the TTL) and the cache is always warm.
+
+## Negative Caching
+
+When a lookup misses the database too, cache the miss for a short window so subsequent requests don't re-hit the database:
+
+```python
+from src.infrastructure.cache import get, set
+
+NEGATIVE_TTL = 60  # 1 minute — keep negative caches very short
+SENTINEL = "__NOT_FOUND__"
+
+
+async def get_widget(widget_id: int, db: AsyncSession) -> dict | None:
+    cache_key = f"widget:{widget_id}"
+    cached = await get(key=cache_key)
+
+    if cached == SENTINEL:
+        return None
+    if cached is not None:
+        return cached
+
+    result = await widget_service.get_by_id(widget_id, db)
+    if result is None:
+        await set(key=cache_key, value=SENTINEL, expiration=NEGATIVE_TTL)
+        return None
+
+    await set(key=cache_key, value=result, expiration=600)
+    return result
+```
+
+Keep negative TTLs **much shorter** than positive ones — the row will appear eventually and you don't want users to keep getting 404s for a minute after creation.
+
+## Per-User vs Global Caches
+
+The single biggest mistake when adding `@cache` to an endpoint that returns user-specific data is keying only by resource ID. Two concrete problems:
+
+```python
+# WRONG — every user gets user 1's data
+@router.get("/me/dashboard")
+@cache(key_prefix="dashboard", resource_id_name="user_id")
+async def my_dashboard(request: Request, user_id: int, ...):
+    ...
+```
+
+Multiple users hit `dashboard:1` (the user_id of the first cached request) and see each other's data. Two fixes:
+
+```python
+# Include user in the prefix
+@cache(key_prefix="dashboard_for_user_{user_id}", resource_id_name="user_id")
+# → dashboard_for_user_5:5  ← key includes user
+
+# Or just don't cache personalized responses
+# (often the right call — Redis hits add latency for hot per-user data anyway)
+```
+
+## Picking TTLs
+
+Default is one hour (`3600`). Override per route based on staleness tolerance:
+
+| Data shape                                    | Suggested TTL              |
+|-----------------------------------------------|----------------------------|
+| Static reference data (tier list, countries)  | 24 hours (`86400`)         |
+| User profile / public objects                 | 5–30 minutes (`300`–`1800`)|
+| Paginated list endpoints                      | 1–5 minutes (`60`–`300`)   |
+| Search results                                | 5–15 minutes (`300`–`900`) |
+| Frequently changing dashboards                | 30–60 seconds              |
+| Negative caches (404 lookups)                 | 30–120 seconds             |
+
+When in doubt, start short. It's cheap to raise a TTL once you trust the invalidation paths — much harder to debug stale-data complaints from a 24-hour cache.
+
+## Operational Notes
+
+### Read your keys in production
+
+```bash
+redis-cli -h $CACHE_REDIS_HOST KEYS 'widget:*'
+redis-cli -h $CACHE_REDIS_HOST TTL widget:42
+redis-cli -h $CACHE_REDIS_HOST GET widget:42
+```
+
+If you can't tell from the key alone what's cached and how it's invalidated, your prefix is too short.
+
+### Watch for fail-open behavior
+
+The decorator catches Redis errors and falls through to the handler. That's good for availability but means you can have a "cache is down" outage that looks like a "DB is slow" outage on dashboards. Watch the logs for:
+
+```
+Cache backend not available: <error>
+```
+
+Alert on the rate of those, not just on Redis being unreachable.
+
+### Don't cache personal data without thinking
+
+If your handler returns different bodies depending on auth state, headers, or query params, those have to be in the key. The decorator only sees what you pass in `key_prefix` placeholders and `resource_id_name`.
+
+## Anti-Patterns to Avoid
+
+- **Caching mutation responses.** The decorator only caches GETs; if you find yourself wanting to cache a POST/PATCH response, you probably want to cache the underlying GET that's about to refresh anyway.
+- **Reaching into the cache for state that's not derived from the database.** Cached state must be reconstructable. If losing the cache loses real data, you needed a DB row, not a cache key.
+- **Mixing TTLs across paginated pages.** `widgets:page_1` expiring an hour before `widgets:page_2` produces inconsistent pagination. Use the same TTL across the entire prefix family.
+- **Pattern invalidation on every mutation.** Pattern scans get expensive at scale. Reach for them only when you genuinely need to wipe many keys at once.
+
+## Key Files
+
+| Component             | Location                                              |
+|-----------------------|-------------------------------------------------------|
+| Decorator             | `backend/src/infrastructure/cache/decorator.py`       |
+| Provider API          | `backend/src/infrastructure/cache/provider.py`        |
+| Backends              | `backend/src/infrastructure/cache/backends/`          |
+| Lifespan integration  | `backend/src/infrastructure/app_factory.py`           |
+
+## Next Steps
+
+- **[Redis Cache](redis-cache.md)** — Decorator parameters and provider API reference
+- **[Client Cache](client-cache.md)** — `Cache-Control` headers for browser caching
+- **[Background Tasks](../background-tasks/index.md)** — Scheduling cache warming jobs with Taskiq

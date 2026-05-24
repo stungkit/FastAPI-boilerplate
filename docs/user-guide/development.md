@@ -1,729 +1,372 @@
 # Development Guide
 
-This guide covers everything you need to know about extending, customizing, and developing with the FastAPI boilerplate.
+This page covers the day-to-day development loop: running the app, the tools that ship with it, how to add a new module, and what to know about debugging the boilerplate's moving parts.
 
-## Extending the Boilerplate
+For end-to-end "how do I add an entity," see:
 
-### Adding New Models
+- **[Database → Models](database/models.md)** — defining `Base`-derived dataclass models
+- **[Database → Schemas](database/schemas.md)** — request/response Pydantic models
+- **[API → Endpoints](api/endpoints.md)** — wiring routes to services
+- **[Admin Panel → Adding Models](admin-panel/adding-models.md)** — surfacing the model in the admin UI
 
-Follow this step-by-step process to add new entities to your application:
+This page is the meta-guide that ties them together.
 
-#### 1. Create SQLAlchemy Model
-
-Create a new file in `src/app/models/` (e.g., `category.py`):
-
-```python
-from sqlalchemy import String, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from ..core.db.database import Base
-
-
-```
-class Category(Base):
-    __tablename__ = "category"
-
-    id: Mapped[int] = mapped_column(
-        "id",
-        autoincrement=True,
-        nullable=False,
-        unique=True,
-        primary_key=True,
-        init=False,
-    )
-
-    name: Mapped[str] = mapped_column(String(50))
-    description: Mapped[str | None] = mapped_column(String(255), default=None)
-
-
-class Post(Base):
-    __tablename__ = "post"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    title: Mapped[str] = mapped_column(String(100))
-
-    category_id: Mapped[int | None] = mapped_column(
-        ForeignKey("category.id"),
-        index=True,
-        default=None
-    )
-```
-
-#### 2. Create Pydantic Schemas
-
-Create `src/app/schemas/category.py`:
-
-```python
-from datetime import datetime
-from typing import Annotated
-from pydantic import BaseModel, Field, ConfigDict
-
-
-class CategoryBase(BaseModel):
-    name: Annotated[str, Field(min_length=1, max_length=50)]
-    description: Annotated[str | None, Field(max_length=255, default=None)]
-
-
-class CategoryCreate(CategoryBase):
-    model_config = ConfigDict(extra="forbid")
-
-
-class CategoryRead(CategoryBase):
-    model_config = ConfigDict(from_attributes=True)
-    
-    id: int
-    created_at: datetime
-
-
-class CategoryUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    
-    name: Annotated[str | None, Field(min_length=1, max_length=50, default=None)]
-    description: Annotated[str | None, Field(max_length=255, default=None)]
-
-
-class CategoryUpdateInternal(CategoryUpdate):
-    updated_at: datetime
-
-
-class CategoryDelete(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    
-    is_deleted: bool
-    deleted_at: datetime
-```
-
-#### 3. Create CRUD Operations
-
-Create `src/app/crud/crud_categories.py`:
-
-```python
-from fastcrud import FastCRUD
-
-from ..models.category import Category
-from ..schemas.category import CategoryCreate, CategoryUpdate, CategoryUpdateInternal, CategoryDelete
-
-CRUDCategory = FastCRUD[Category, CategoryCreate, CategoryUpdate, CategoryUpdateInternal, CategoryDelete]
-crud_categories = CRUDCategory(Category)
-```
-
-#### 4. Update Model Imports
-
-Add your new model to `src/app/models/__init__.py`:
-
-```python
-from .category import Category
-from .user import User
-from .post import Post
-# ... other imports
-```
-
-#### 5. Create Database Migration
-
-Generate and apply the migration:
+## Running the App
 
 ```bash
-# From the src/ directory
-uv run alembic revision --autogenerate -m "Add category model"
-uv run alembic upgrade head
+cd backend
+uv run uvicorn src.interfaces.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-#### 6. Create API Endpoints
+`--reload` watches the filesystem and restarts on Python file changes. Use it for development; **never** in production.
 
-Create `src/app/api/v1/categories.py`:
+If you're using Docker:
 
-```python
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastcrud import PaginatedListResponse, compute_offset
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from ...api.dependencies import get_current_superuser, get_current_user
-from ...core.db.database import async_get_db
-from ...core.exceptions.http_exceptions import DuplicateValueException, NotFoundException
-from ...crud.crud_categories import crud_categories
-from ...schemas.category import CategoryCreate, CategoryRead, CategoryUpdate
-
-router = APIRouter(tags=["categories"])
-
-
-@router.post("/category", response_model=CategoryRead, status_code=201)
-async def write_category(
-    request: Request,
-    category: CategoryCreate,
-    current_user: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_get_db)],
-):
-    category_row = await crud_categories.exists(db=db, name=category.name)
-    if category_row:
-        raise DuplicateValueException("Category name already exists")
-
-    return await crud_categories.create(db=db, object=category)
-
-
-@router.get("/categories", response_model=PaginatedListResponse[CategoryRead])
-async def read_categories(
-    request: Request,
-    db: Annotated[AsyncSession, Depends(async_get_db)],
-    page: int = 1,
-    items_per_page: int = 10,
-):
-    categories_data = await crud_categories.get_multi(
-        db=db,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
-        schema_to_select=CategoryRead,
-        is_deleted=False,
-    )
-
-    return categories_data
-
-
-@router.get("/category/{category_id}", response_model=CategoryRead)
-async def read_category(
-    request: Request,
-    category_id: int,
-    db: Annotated[AsyncSession, Depends(async_get_db)],
-):
-    db_category = await crud_categories.get(
-        db=db, 
-        schema_to_select=CategoryRead, 
-        id=category_id,
-        is_deleted=False
-    )
-    if not db_category:
-        raise NotFoundException("Category not found")
-
-    return db_category
-
-
-@router.patch("/category/{category_id}", response_model=CategoryRead)
-async def patch_category(
-    request: Request,
-    category_id: int,
-    values: CategoryUpdate,
-    current_user: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_get_db)],
-):
-    db_category = await crud_categories.get(db=db, id=category_id, is_deleted=False)
-    if not db_category:
-        raise NotFoundException("Category not found")
-
-    if values.name:
-        category_row = await crud_categories.exists(db=db, name=values.name)
-        if category_row and category_row["id"] != category_id:
-            raise DuplicateValueException("Category name already exists")
-
-    return await crud_categories.update(db=db, object=values, id=category_id)
-
-
-@router.delete("/category/{category_id}")
-async def erase_category(
-    request: Request,
-    category_id: int,
-    current_user: Annotated[dict, Depends(get_current_superuser)],
-    db: Annotated[AsyncSession, Depends(async_get_db)],
-):
-    db_category = await crud_categories.get(db=db, id=category_id, is_deleted=False)
-    if not db_category:
-        raise NotFoundException("Category not found")
-
-    await crud_categories.delete(db=db, db_row=db_category, garbage_collection=False)
-    return {"message": "Category deleted"}
+```bash
+docker compose up -d                # API + Postgres + Redis
+docker compose logs -f api          # tail the api logs
+docker compose exec api bash        # shell into the api container
 ```
 
-#### 7. Register Router
+The service names depend on your `docker-compose.yml`; the `api` name is conventional.
 
-Add your router to `src/app/api/v1/__init__.py`:
+## The Background Worker
 
-```python
-from fastapi import APIRouter
-from .categories import router as categories_router
-# ... other imports
+If your app uses Taskiq tasks, run a worker alongside the API in a second terminal:
 
-router = APIRouter()
-router.include_router(categories_router, prefix="/categories")
-# ... other router includes
+```bash
+cd backend
+uv run taskiq worker infrastructure.taskiq.worker:default_broker --reload
 ```
 
-### Creating Custom Middleware
+`--reload` is dev-only; drop it in production. See [Background Tasks](background-tasks/index.md) for details.
 
-Create middleware in `src/app/middleware/`:
+## The Dev Toolchain
+
+The project ships configured `ruff`, `mypy`, and `pytest` via `backend/pyproject.toml`:
+
+```bash
+cd backend
+
+# Lint + format (ruff handles both)
+uv run ruff check .
+uv run ruff format .
+uv run ruff check --fix .          # auto-fix what ruff can
+
+# Type check
+uv run mypy src
+
+# Tests
+uv run pytest
+uv run pytest -k "test_user"       # run tests matching a name
+uv run pytest -x                   # stop on first failure
+uv run pytest -n auto              # parallel via pytest-xdist
+```
+
+Ruff is configured (`pyproject.toml:[tool.ruff]`) with:
+
+- `line-length = 128`
+- Selected rule sets: `E`, `F`, `I`, `UP` (pyflakes, pycodestyle, isort, pyupgrade)
+- `known-first-party = ["src"]` so `src.*` imports are grouped correctly
+
+Mypy is intentionally relaxed (`disallow_untyped_defs = false`) — adopt strictness gradually as you add types to new modules.
+
+## Pre-Commit
+
+The repo's `.pre-commit-config.yaml` wires up ruff, pyupgrade, docformatter, mdformat, and a few standard hygiene hooks (trailing whitespace, large files, private keys). Install once:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+After that, `git commit` runs the hooks automatically. To run them ad hoc:
+
+```bash
+pre-commit run --all-files
+```
+
+## Adding a New Module
+
+The boilerplate organizes domain code under `backend/src/modules/<name>/` with a vertical-slice layout. To add a `widgets` module:
+
+```text
+backend/src/modules/widgets/
+├── __init__.py
+├── models.py        # SQLAlchemy model (Base + dataclass)
+├── schemas.py       # Pydantic request/response models
+├── crud.py          # FastCRUD instance
+├── service.py       # Business logic — calls CRUD, raises domain errors
+└── routes.py        # FastAPI router — wraps the service, handles HTTP
+```
+
+The full pattern (with concrete code) is in [Database → Models](database/models.md) and [API → Endpoints](api/endpoints.md). The short version:
+
+1. **Write the model** in `models.py`. Inherit from `Base`, use mixins (`TimestampMixin`, `SoftDeleteMixin`, `UUIDMixin`) where they apply.
+2. **Write the schemas** in `schemas.py`. Standard set: `WidgetBase`, `WidgetCreate`, `WidgetRead`, `WidgetUpdate`, plus `WidgetSelect` for FastCRUD's `schema_to_select`.
+3. **Wire FastCRUD** in `crud.py`:
+   ```python
+   from fastcrud import FastCRUD
+   from .models import Widget
+   crud_widgets = FastCRUD(Widget)
+   ```
+4. **Implement the service** in `service.py` with class methods that call `crud_widgets`, raise `DomainError` subclasses on bad state.
+5. **Define routes** in `routes.py`. Wrap the service, catch domain exceptions via `handle_exception`, return dicts (FastAPI serializes through `response_model=WidgetRead`).
+6. **Register the router** in `interfaces/main.py` (or wherever your top-level routers are aggregated):
+   ```python
+   from src.modules.widgets.routes import router as widgets_router
+   api_v1.include_router(widgets_router, prefix="/widgets")
+   ```
+7. **Generate a migration**:
+   ```bash
+   cd backend
+   uv run alembic revision --autogenerate -m "Add widget model"
+   uv run alembic upgrade head
+   ```
+   Note: `validate_production_migration` runs at the start of `env.py` and refuses to apply migrations in production unless `CONFIRM_PRODUCTION_MIGRATION=yes` is set. Local development is unaffected.
+8. **(Optional)** Add a `WidgetAdmin` view — see [Admin Panel → Adding Models](admin-panel/adding-models.md).
+
+The Alembic env (`backend/migrations/env.py`) auto-discovers models via `import_models("src.modules")`, so new modules are picked up by `--autogenerate` without any manual import wiring — provided your model is in `modules/<name>/models.py`.
+
+## Adding Custom Middleware
+
+Middleware lives at `backend/src/infrastructure/middleware.py` (or a peer file you create). The pattern:
 
 ```python
+import time
+
 from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.types import ASGIApp
 
 
-class CustomHeaderMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Pre-processing
-        start_time = time.time()
-        
-        # Process request
+class TimingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        start = time.perf_counter()
         response = await call_next(request)
-        
-        # Post-processing
-        process_time = time.time() - start_time
-        response.headers["X-Process-Time"] = str(process_time)
-        
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.1f}"
         return response
 ```
 
-Register in `src/app/main.py`:
+Register in `infrastructure/app_factory.py` (or your overridden `create_application`):
 
 ```python
-from .middleware.custom_header_middleware import CustomHeaderMiddleware
-
-app.add_middleware(CustomHeaderMiddleware)
+application.add_middleware(TimingMiddleware)
 ```
+
+Order matters — middleware added later runs **earlier** in the request path. The boilerplate's own middlewares (`SecurityHeadersMiddleware`, `ClientCacheMiddleware`, `RateLimiterMiddleware`, `SessionMiddleware`, etc.) are added in a deliberate order; see `app_factory.py:create_application`.
+
+## Adding a Custom Dependency
+
+Dependencies belong with the feature they serve. For session-aware dependencies, look at `infrastructure/auth/session/dependencies.py:get_current_user` for a template.
+
+```python
+from typing import Annotated
+
+from fastapi import Depends, Request
+
+from src.infrastructure.auth.session.dependencies import get_current_user
+
+
+def get_workspace(
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+) -> str:
+    workspace = request.headers.get("X-Workspace")
+    if not workspace:
+        raise PermissionDeniedError("Missing workspace header")
+    # validate workspace membership against current_user...
+    return workspace
+```
+
+Use it as `Depends(get_workspace)` on a route, or in another dependency for chaining.
+
+## Debugging Tips
+
+### See every SQL query
+
+Set `DATABASE_ECHO=true` in your `.env`. Every statement (and parameter binding) is logged. Useful when investigating why a FastCRUD call returns the wrong shape, or when chasing N+1 issues.
+
+### Inspect rate-limit and cache state
+
+```bash
+docker compose exec redis redis-cli
+> SELECT 0                           # cache DB
+> KEYS '*'
+> SELECT 1                           # rate-limiter DB
+> KEYS 'ratelimit:*'
+> SELECT 3                           # taskiq queue DB
+> LRANGE default 0 -1                # pending tasks
+```
+
+Each subsystem uses a different Redis DB number; see `.env.example` for the conventions (`CACHE_REDIS_DB=0`, `SESSION_REDIS_DB=1`, `RATE_LIMITER_REDIS_DB=1` (yes, the rate limiter shares with sessions in defaults — change one if you want isolation), `TASKIQ_REDIS_DB=3`).
+
+### Watch sessions live
+
+If a user reports being logged out unexpectedly, check the session backend directly:
+
+```python
+from src.infrastructure.auth.session import SessionManager
+manager = SessionManager()
+sessions = await manager.get_user_sessions(user_id=42)
+```
+
+See [Authentication → Sessions](authentication/sessions.md) for full details.
+
+### Use the interactive docs
+
+`http://localhost:8000/docs` (Swagger UI) and `http://localhost:8000/redoc` are auto-generated from your routes. Send requests directly from the UI; every endpoint that takes a Pydantic body has a "Try it out" form. Only present in non-production by default — gated by `OPENAPI_URL`.
+
+### Production validators
+
+When `ENVIRONMENT=production`, `infrastructure/security/` runs validators at startup that fail loudly on:
+
+- Placeholder `SECRET_KEY`
+- `DEBUG=true`
+- Unset `CORS_ORIGINS` or `CORS_ORIGINS=*`
+
+If your prod boot is failing with one of those, that's your hint — don't bypass the validator.
 
 ## Testing
 
-### Test Configuration
+The repo is **set up** for `pytest` but doesn't ship example tests yet — `backend/pyproject.toml` configures pytest with:
 
-The boilerplate uses pytest for testing. Test configuration is in `pytest.ini` and test dependencies in `pyproject.toml`.
+```toml
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+env = ["ENVIRONMENT=pytest", "PYTEST_CURRENT_TEST=true"]
+```
 
-### Database Testing Setup
+Tests run with `ENVIRONMENT=pytest`, which the production validator treats as "not production" — your test suite won't be blocked by missing prod-only env vars.
 
-Create test database fixtures in `tests/conftest.py`:
+A sane starting `tests/conftest.py`:
 
 ```python
-import asyncio
+# tests/conftest.py
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from src.app.core.config import settings
-from src.app.core.db.database import Base, async_get_db
-from src.app.main import app
+from src.infrastructure.database.models import Base
+from src.infrastructure.database.session import async_session
+from src.interfaces.main import app
 
-# Test database URL
-TEST_DATABASE_URL = "postgresql+asyncpg://test_user:test_pass@localhost:5432/test_db"
-
-# Create test engine
-test_engine = create_async_engine(TEST_DATABASE_URL, echo=True)
-TestSessionLocal = sessionmaker(
-    test_engine, class_=AsyncSession, expire_on_commit=False
-)
+TEST_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/test_db"
 
 
 @pytest_asyncio.fixture
-async def async_session():
-    async with test_engine.begin() as conn:
+async def db_engine():
+    engine = create_async_engine(TEST_DATABASE_URL)
+    async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    
-    async with TestSessionLocal() as session:
-        yield session
-    
-    async with test_engine.begin() as conn:
+    yield engine
+    async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+    await engine.dispose()
 
 
 @pytest_asyncio.fixture
-async def async_client(async_session):
-    def get_test_db():
-        return async_session
-    
-    app.dependency_overrides[async_get_db] = get_test_db
-    
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        yield client
-    
+async def db_session(db_engine) -> AsyncSession:
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        yield session
+
+
+@pytest_asyncio.fixture
+async def client(db_session):
+    async def override_db():
+        yield db_session
+
+    app.dependency_overrides[async_session] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
     app.dependency_overrides.clear()
 ```
 
-### Writing Tests
-
-#### Model Tests
+Then a smoke test:
 
 ```python
-# tests/test_models.py
-import pytest
-from src.app.models.user import User
-
-
-@pytest_asyncio.fixture
-async def test_user(async_session):
-    user = User(
-        name="Test User",
-        username="testuser",
-        email="test@example.com",
-        hashed_password="hashed_password"
-    )
-    async_session.add(user)
-    await async_session.commit()
-    await async_session.refresh(user)
-    return user
-
-
-async def test_user_creation(test_user):
-    assert test_user.name == "Test User"
-    assert test_user.username == "testuser"
-    assert test_user.email == "test@example.com"
-```
-
-#### API Endpoint Tests
-
-```python
-# tests/test_api.py
-import pytest
-from httpx import AsyncClient
-
-
-async def test_create_user(async_client: AsyncClient):
-    user_data = {
-        "name": "New User",
-        "username": "newuser",
-        "email": "new@example.com",
-        "password": "SecurePass123!"
-    }
-    
-    response = await async_client.post("/api/v1/users", json=user_data)
-    assert response.status_code == 201
-    
-    data = response.json()
-    assert data["name"] == "New User"
-    assert data["username"] == "newuser"
-    assert "hashed_password" not in data  # Ensure password not exposed
-
-
-async def test_read_users(async_client: AsyncClient):
-    response = await async_client.get("/api/v1/users")
+# tests/test_smoke.py
+async def test_health(client):
+    response = await client.get("/api/v1/health")
     assert response.status_code == 200
-    
-    data = response.json()
-    assert "data" in data
-    assert "total_count" in data
 ```
 
-#### CRUD Tests
-
-```python
-# tests/test_crud.py
-import pytest
-from src.app.crud.crud_users import crud_users
-from src.app.schemas.user import UserCreate
-
-
-async def test_crud_create_user(async_session):
-    user_data = UserCreate(
-        name="CRUD User",
-        username="cruduser",
-        email="crud@example.com",
-        password="password123"
-    )
-    
-    user = await crud_users.create(db=async_session, object=user_data)
-    assert user["name"] == "CRUD User"
-    assert user["username"] == "cruduser"
-
-
-async def test_crud_get_user(async_session, test_user):
-    retrieved_user = await crud_users.get(
-        db=async_session, 
-        id=test_user.id
-    )
-    assert retrieved_user["name"] == test_user.name
-```
-
-### Running Tests
-
-```bash
-# Run all tests
-uv run pytest
-
-# Run with coverage
-uv run pytest --cov=src
-
-# Run specific test file
-uv run pytest tests/test_api.py
-
-# Run with verbose output
-uv run pytest -v
-
-# Run tests matching pattern
-uv run pytest -k "test_user"
-```
+For tests that genuinely need Postgres semantics (FK constraints, ARRAY types, JSONB), `testcontainers-postgres` is already a dev dependency — spin up a real Postgres in a fixture instead of mocking the database.
 
-## Customization
-
-### Environment-Specific Configuration
+For unit tests on services, mock at the **CRUD layer**, not at the database. The service contract is "I call `crud_widgets.get` and get back a dict-or-None"; that's the seam to mock.
 
-Create environment-specific settings:
-
-```python
-# src/app/core/config.py
-class LocalSettings(Settings):
-    ENVIRONMENT: str = "local"
-    DEBUG: bool = True
-    
-class ProductionSettings(Settings):
-    ENVIRONMENT: str = "production"
-    DEBUG: bool = False
-    # Production-specific settings
-
-def get_settings():
-    env = os.getenv("ENVIRONMENT", "local")
-    if env == "production":
-        return ProductionSettings()
-    return LocalSettings()
+## Customizing the Settings
 
-settings = get_settings()
-```
-
-### Custom Logging
+Settings live in `backend/src/infrastructure/config/settings.py`. To add a new env-driven value:
 
-Configure logging in `src/app/core/config.py`:
+1. Add the field to the relevant settings class (or create a new one):
+   ```python
+   class WidgetSettings(BaseSettings):
+       WIDGET_BATCH_SIZE: int = config("WIDGET_BATCH_SIZE", default=100, cast=int)
+   ```
+2. Add it to the composed `Settings` mixin list at the bottom of `settings.py`.
+3. Document the env var in `backend/.env.example`.
 
-```python
-import logging
-from pythonjsonlogger import jsonlogger
+Then read it via `get_settings().WIDGET_BATCH_SIZE`.
 
-def setup_logging():
-    # JSON logging for production
-    if settings.ENVIRONMENT == "production":
-        logHandler = logging.StreamHandler()
-        formatter = jsonlogger.JsonFormatter()
-        logHandler.setFormatter(formatter)
-        logger = logging.getLogger()
-        logger.addHandler(logHandler)
-        logger.setLevel(logging.INFO)
-    else:
-        # Simple logging for development
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
-```
+See [Configuration → Settings Classes](configuration/settings-classes.md) for the full pattern.
 
-## Opting Out of Services
+## Disabling Subsystems
 
-### Disabling Redis Caching
+Most major subsystems toggle via env vars rather than code changes:
 
-1. Remove cache decorators from endpoints
-2. Update dependencies in `src/app/core/config.py`:
+| Subsystem        | Toggle                                | Effect                                      |
+|------------------|---------------------------------------|---------------------------------------------|
+| Cache            | `CACHE_ENABLED=false`                 | `@cache` becomes a no-op                    |
+| Client cache     | `CLIENT_CACHE_ENABLED=false`          | Middleware doesn't mount                    |
+| Rate limiter     | `RATE_LIMITER_ENABLED=false`          | `check_rate_limit` returns immediately      |
+| Background tasks | Don't run the worker                  | The broker is created but no consumer       |
+| Admin panel      | `ADMIN_ENABLED=false`                 | `/admin` is unmounted                       |
+| Documentation    | `OPENAPI_URL=`                        | Disables `/docs` and `/redoc`               |
 
-```python
-class Settings(BaseSettings):
-    # Comment out or remove Redis cache settings
-    # REDIS_CACHE_HOST: str = "localhost"
-    # REDIS_CACHE_PORT: int = 6379
-    pass
-```
+Removing a subsystem entirely (deleting the code) is rare and usually wrong — leaving it disabled costs nothing.
 
-3. Remove Redis cache imports and usage
+## Common Mistakes
 
-### Disabling Background Tasks (ARQ)
+### "Auto-import" gotchas
 
-1. Remove ARQ from `pyproject.toml` dependencies
-2. Remove worker configuration from `docker-compose.yml`
-3. Delete `src/app/core/worker/` directory
-4. Remove task-related endpoints
+The boilerplate uses `import_models("src.modules")` in Alembic to discover models. **The discovery walks `modules/<name>/models.py` only.** If you put models in `modules/<name>/sub/inner.py`, autogenerate won't find them. Either keep models in `models.py` or hand-import the file.
 
-### Disabling Rate Limiting
+### Forgetting `lazy="selectin"` on a relationship
 
-1. Remove rate limiting dependencies from endpoints:
+SQLAdmin runs in async context. A relationship without `lazy="selectin"` raises `MissingGreenlet` when the admin tries to render it. Both `User.tier` and other relationships in the boilerplate already use this pattern — copy from those.
 
-```python
-# Remove this dependency
-dependencies=[Depends(rate_limiter_dependency)]
-```
+### Dataclass models without `init=False` on relationships
 
-2. Remove rate limiting models and schemas
-3. Update database migrations to remove rate limit tables
+`Base = DeclarativeBase + MappedAsDataclass`. Relationship fields must use `init=False` or they end up in the dataclass `__init__` and crash on insert. See `modules/user/models.py:User.tier` for the pattern.
 
-### Disabling Authentication
+### Catching exceptions too broadly in routes
 
-1. Remove JWT dependencies from protected endpoints
-2. Remove user-related models and endpoints
-3. Update database to remove user tables
-4. Remove authentication middleware
+The route layer catches domain errors (`ResourceNotFoundError`, `PermissionDeniedError`, etc.) and re-raises specific HTTP exceptions. Don't catch them inside the service — services raise; routes translate. The `handle_exception` helper in `modules/common/utils/error_handler.py` does the translation; routes call it as a fallback for unexpected errors.
 
-### Minimal FastAPI Setup
+### Cache decorators without `request: Request`
 
-For a minimal setup with just basic FastAPI:
+The `@cache` decorator inspects `request.method` to decide read vs invalidate. The first parameter of every decorated route must be `request: Request`. See [Caching → Server-Side Cache](caching/redis-cache.md) for the rest of the contract.
 
-```python
-# src/app/main.py (minimal version)
-from fastapi import FastAPI
+## Key Files
 
-app = FastAPI(
-    title="Minimal API",
-    description="Basic FastAPI application",
-    version="1.0.0"
-)
+| Component                    | Location                                                    |
+|------------------------------|-------------------------------------------------------------|
+| App factory / middleware order | `backend/src/infrastructure/app_factory.py`              |
+| Settings                     | `backend/src/infrastructure/config/settings.py`             |
+| Lifespan / startup           | `backend/src/infrastructure/app_factory.py:lifespan_factory`|
+| Database session             | `backend/src/infrastructure/database/session.py`            |
+| Module template (reference)  | `backend/src/modules/user/`                                 |
+| Pre-commit                   | `.pre-commit-config.yaml`                                   |
+| pyproject (lint / type / test) | `backend/pyproject.toml`                                  |
 
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
+## Next Steps
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
-```
-
-## Best Practices
-
-### Code Organization
-
-- Keep models, schemas, and CRUD operations in separate files
-- Use consistent naming conventions across the application
-- Group related functionality in modules
-- Follow FastAPI and Pydantic best practices
-
-### Database Operations
-
-- Always use transactions for multi-step operations
-- Implement soft deletes for important data
-- Use database constraints for data integrity
-- Index frequently queried columns
-
-### API Design
-
-- Use consistent response formats
-- Implement proper error handling
-- Version your APIs from the start
-- Document all endpoints with proper schemas
-
-### Security
-
-- Never expose sensitive data in API responses
-- Use proper authentication and authorization
-- Validate all input data
-- Implement rate limiting for public endpoints
-- Use HTTPS in production
-
-### Performance
-
-- Use async/await consistently
-- Implement caching for expensive operations
-- Use database connection pooling
-- Monitor and optimize slow queries
-- Use pagination for large datasets
-
-## Troubleshooting
-
-### Common Issues
-
-**Import Errors**: Ensure all new models are imported in `__init__.py` files
-
-**Migration Failures**: Check model definitions and relationships before generating migrations
-
-**Test Failures**: Verify test database configuration and isolation
-
-**Performance Issues**: Check for N+1 queries and missing database indexes
-
-**Authentication Problems**: Verify JWT configuration and token expiration settings
-
-### Debugging Tips
-
-- Use FastAPI's automatic interactive docs at `/docs`
-- Enable SQL query logging in development
-- Use proper logging throughout the application
-- Test endpoints with realistic data volumes
-- Monitor database performance with query analysis
-
-## Database Migrations
-
-!!! warning "Important Setup for Docker Users"
-    If you're using the database in Docker, you need to expose the port to run migrations. Change this in `docker-compose.yml`:
-
-    ```yaml
-    db:
-      image: postgres:13
-      env_file:
-        - ./src/.env
-      volumes:
-        - postgres-data:/var/lib/postgresql/data
-      # -------- replace with comment to run migrations with docker --------
-      ports:
-        - 5432:5432
-      # expose:
-      #   - "5432"
-    ```
-
-### Creating Migrations
-
-!!! warning "Model Import Requirement"
-    To create tables if you haven't created endpoints yet, ensure you import the models in `src/app/models/__init__.py`. This step is crucial for Alembic to detect new tables.
-
-While in the `src` folder, run Alembic migrations:
-
-```bash
-# Generate migration file
-uv run alembic revision --autogenerate -m "Description of changes"
-
-# Apply migrations
-uv run alembic upgrade head
-```
-
-!!! note "Without uv"
-    If you don't have uv, run `pip install alembic` first, then use `alembic` commands directly.
-
-### Migration Workflow
-
-1. **Make Model Changes** - Modify your SQLAlchemy models
-2. **Import Models** - Ensure models are imported in `src/app/models/__init__.py`
-3. **Generate Migration** - Run `alembic revision --autogenerate`
-4. **Review Migration** - Check the generated migration file in `src/migrations/versions/`
-5. **Apply Migration** - Run `alembic upgrade head`
-6. **Test Changes** - Verify your changes work as expected
-
-### Common Migration Tasks
-
-#### Adding a New Model
-
-```python
-# 1. Create the model file (e.g., src/app/models/category.py)
-from sqlalchemy import String
-from sqlalchemy.orm import Mapped, mapped_column
-
-from app.core.db.database import Base
-
-class Category(Base):
-    __tablename__ = "categories"
-    
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(50))
-    description: Mapped[str] = mapped_column(String(255), nullable=True)
-```
-
-```python
-# 2. Import in src/app/models/__init__.py
-from .user import User
-from .post import Post
-from .tier import Tier
-from .rate_limit import RateLimit
-from .category import Category  # Add this line
-```
-
-```bash
-# 3. Generate and apply migration
-cd src
-uv run alembic revision --autogenerate -m "Add categories table"
-uv run alembic upgrade head
-```
-
-#### Modifying Existing Models
-
-```python
-# 1. Modify your model
-class User(Base):
-    # ... existing fields ...
-    bio: Mapped[str] = mapped_column(String(500), nullable=True)  # New field
-```
-
-```bash
-# 2. Generate migration
-uv run alembic revision --autogenerate -m "Add bio field to users"
-
-# 3. Review the generated migration file
-# 4. Apply migration
-uv run alembic upgrade head
-```
-
-This guide provides the foundation for extending and customizing the FastAPI boilerplate. For specific implementation details, refer to the existing code examples throughout the boilerplate. 
+- **[Project Structure](project-structure.md)** — full layout walkthrough
+- **[Testing](testing.md)** — test patterns and infrastructure
+- **[Production](production.md)** — deployment and hardening checklist

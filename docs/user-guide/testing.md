@@ -1,810 +1,399 @@
-# Testing Guide
+# Testing
 
-This guide covers comprehensive testing strategies for the FastAPI boilerplate, including unit tests, integration tests, and API testing.
+The boilerplate ships pytest configured against `tests/` at the repo root, with `testcontainers-postgres` available for real-database tests and `httpx` for HTTP-level tests against the FastAPI app. **No example tests ship yet** — this page covers the patterns you'll use when you add them.
 
-## Test Setup
+## What's Configured
 
-### Testing Dependencies
+`backend/pyproject.toml`:
 
-The boilerplate uses these testing libraries:
-
-- **pytest** - Testing framework
-- **pytest-asyncio** - Async test support
-- **httpx** - Async HTTP client for API tests
-- **pytest-cov** - Coverage reporting
-- **faker** - Test data generation
-
-### Test Configuration
-
-#### pytest.ini
-
-```ini
-[tool:pytest]
-testpaths = tests
-python_files = test_*.py
-python_classes = Test*
-python_functions = test_*
-addopts = 
-    -v
-    --strict-markers
-    --strict-config
-    --cov=src
-    --cov-report=term-missing
-    --cov-report=html
-    --cov-report=xml
-    --cov-fail-under=80
-markers =
-    unit: Unit tests
-    integration: Integration tests
-    api: API tests
-    slow: Slow tests
-asyncio_mode = auto
+```toml
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+python_classes = ["Test*"]
+asyncio_mode = "auto"
+env = ["ENVIRONMENT=pytest", "PYTEST_CURRENT_TEST=true"]
+markers = [
+    "unit: Unit tests that don't require external dependencies",
+    "integration: Integration tests that may require external services",
+    "asyncio: Tests that use asyncio",
+    "slow: marks tests as slow running",
+]
 ```
 
-#### Test Database Setup
+What this gets you:
 
-Create `tests/conftest.py`:
+- **`pythonpath = ["src"]`** — `from src.modules.user.service import UserService` works without manual sys.path hacks
+- **`asyncio_mode = "auto"`** — every `async def test_*` runs under pytest-asyncio; no decorator needed
+- **`ENVIRONMENT=pytest`** — the production validator skips its checks (sees a non-`production` env), so you don't need a real `SECRET_KEY` to boot the test app
+- **Markers** for `unit` / `integration` / `slow` — use them to split your suite
+
+Available test dependencies (from `[dependency-groups].dev`):
+
+- `pytest`, `pytest-asyncio`, `pytest-mock`
+- `httpx` — for in-process HTTP testing
+- `faker` — for realistic fixture data
+- `testcontainers` + `testcontainers-postgres` — for real-Postgres integration tests
+- `pytest-xdist[psutil]` — for parallel test execution
+
+The repo doesn't currently bundle `pytest-cov`. Add it (`uv add --dev pytest-cov`) when you start tracking coverage.
+
+## Test Layout
+
+Use `tests/` at the repository root. A standard layout:
+
+```text
+tests/
+├── conftest.py                  # global fixtures (app, db, client)
+├── helpers/
+│   ├── __init__.py
+│   └── factories.py             # data-creation helpers (faker-based)
+├── unit/
+│   ├── modules/
+│   │   ├── user/
+│   │   │   ├── test_service.py
+│   │   │   └── test_schemas.py
+│   │   └── tier/
+│   │       └── test_service.py
+│   └── infrastructure/
+│       └── test_session_manager.py
+└── integration/
+    ├── api/
+    │   ├── test_auth.py
+    │   ├── test_users.py
+    │   └── test_tiers.py
+    └── db/
+        └── test_migrations.py
+```
+
+The split is a guideline, not a rule:
+
+- **Unit tests** mock the database (often by mocking the FastCRUD layer) and run fast
+- **Integration tests** use a real Postgres (via testcontainers or a local DB) and exercise the HTTP layer
+
+## A Working `conftest.py`
+
+This is the conftest you'd start from. It provides three layers of fixtures: the FastAPI `app`, an async `db_session`, and an `httpx.AsyncClient` whose database dependency is overridden to use the test session.
 
 ```python
-import asyncio
-import pytest
+# tests/conftest.py
+from collections.abc import AsyncGenerator
+
 import pytest_asyncio
-from typing import AsyncGenerator
-from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from testcontainers.postgres import PostgresContainer
+
+from src.infrastructure.database.models import Base
+from src.infrastructure.database.session import async_session
+from src.interfaces.main import app
+
+
+@pytest_asyncio.fixture(scope="session")
+async def postgres_container() -> AsyncGenerator[PostgresContainer, None]:
+    container = PostgresContainer("postgres:16-alpine", driver="asyncpg")
+    container.start()
+    try:
+        yield container
+    finally:
+        container.stop()
+
+
+@pytest_asyncio.fixture(scope="session")
+async def db_engine(postgres_container):
+    url = postgres_container.get_connection_url()
+    engine = create_async_engine(url, echo=False, future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as session:
+        try:
+            yield session
+        finally:
+            await session.rollback()
+
+
+@pytest_asyncio.fixture
+async def client(db_session) -> AsyncGenerator[AsyncClient, None]:
+    async def override_db():
+        yield db_session
+
+    app.dependency_overrides[async_session] = override_db
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+    app.dependency_overrides.clear()
+```
+
+Key things to notice:
+
+- **`testcontainers.PostgresContainer`** spins up a real Postgres, scoped to the test session. First test pays a few seconds of startup; later tests are fast.
+- **`db_session`** rolls back at the end of every test, so tests don't bleed into each other. The container is reused; the data is not.
+- **`app.dependency_overrides[async_session]`** swaps the production dependency for one that yields the test session — every route ends up reading/writing through your test transaction.
+- **`ASGITransport`** runs the FastAPI app in-process — no real HTTP server is started.
+
+If you don't want to depend on Docker for tests, swap `PostgresContainer` for a connection to a local Postgres (e.g. one already running for development). Use a separate database name (`test_db`, dropped at the end of the session).
+
+## Writing Unit Tests
+
+Unit tests should not touch the database. Mock at the **CRUD layer** — your service contract is "I call `crud_widgets.get` and get back a dict-or-None", and that's the seam.
+
+```python
+# tests/unit/modules/user/test_service.py
+from unittest.mock import AsyncMock
+
+import pytest
+
+from src.modules.common.exceptions import ResourceNotFoundError
+from src.modules.user.service import UserService
+
+
+@pytest.mark.unit
+async def test_get_by_id_returns_user(mocker):
+    mock_crud = mocker.patch("src.modules.user.service.crud_users")
+    mock_crud.get = AsyncMock(return_value={"id": 1, "username": "alice"})
+
+    user = await UserService().get_by_id(user_id=1, db=AsyncMock())
+
+    assert user["username"] == "alice"
+    mock_crud.get.assert_awaited_once()
+
+
+@pytest.mark.unit
+async def test_get_by_id_raises_when_missing(mocker):
+    mock_crud = mocker.patch("src.modules.user.service.crud_users")
+    mock_crud.get = AsyncMock(return_value=None)
+
+    with pytest.raises(ResourceNotFoundError):
+        await UserService().get_by_id(user_id=999, db=AsyncMock())
+```
+
+`pytest-mock`'s `mocker` fixture handles cleanup automatically. `AsyncMock` matches the async CRUD interface.
+
+## Writing Integration Tests
+
+Integration tests use the real database via `client` and `db_session`. The session-based auth flow needs to be honored — `httpx.AsyncClient` keeps cookies between calls, so log in once and reuse the client.
+
+```python
+# tests/integration/api/test_users.py
+import pytest
+
+from src.modules.user.service import UserService
+from tests.helpers.factories import build_user_create_payload
+
+
+@pytest.mark.integration
+async def test_register_login_and_fetch_me(client, db_session):
+    # Register
+    payload = build_user_create_payload(email="alice@example.com", username="alice")
+    register_response = await client.post("/api/v1/users/", json=payload)
+    assert register_response.status_code == 201
+    user_data = register_response.json()
+    assert user_data["username"] == "alice"
+
+    # Log in — sets session cookie on the client
+    login_response = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "alice", "password": payload["password"]},
+    )
+    assert login_response.status_code == 200
+
+    # Authenticated request reuses the cookie automatically
+    me_response = await client.get("/api/v1/users/me/")
+    assert me_response.status_code == 200
+    assert me_response.json()["username"] == "alice"
+```
+
+A small factory to keep payloads readable:
+
+```python
+# tests/helpers/factories.py
 from faker import Faker
-
-from src.app.core.config import settings
-from src.app.core.db.database import Base, async_get_db
-from src.app.main import app
-from src.app.models.user import User
-from src.app.models.post import Post
-from src.app.core.security import get_password_hash
-
-# Test database configuration
-TEST_DATABASE_URL = "postgresql+asyncpg://test_user:test_pass@localhost:5432/test_db"
-
-# Create test engine and session
-test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
-TestSessionLocal = sessionmaker(
-    test_engine, class_=AsyncSession, expire_on_commit=False
-)
 
 fake = Faker()
 
 
-@pytest_asyncio.fixture
-async def async_session() -> AsyncGenerator[AsyncSession, None]:
-    """Create a fresh database session for each test."""
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    
-    async with TestSessionLocal() as session:
-        yield session
-    
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-
-
-@pytest_asyncio.fixture
-async def async_client(async_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
-    """Create an async HTTP client for testing."""
-    def get_test_db():
-        return async_session
-    
-    app.dependency_overrides[async_get_db] = get_test_db
-    
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        yield client
-    
-    app.dependency_overrides.clear()
-
-
-@pytest_asyncio.fixture
-async def test_user(async_session: AsyncSession) -> User:
-    """Create a test user."""
-    user = User(
-        name=fake.name(),
-        username=fake.user_name(),
-        email=fake.email(),
-        hashed_password=get_password_hash("testpassword123"),
-        is_superuser=False
-    )
-    async_session.add(user)
-    await async_session.commit()
-    await async_session.refresh(user)
-    return user
-
-
-@pytest_asyncio.fixture
-async def test_superuser(async_session: AsyncSession) -> User:
-    """Create a test superuser."""
-    user = User(
-        name="Super Admin",
-        username="superadmin",
-        email="admin@test.com",
-        hashed_password=get_password_hash("superpassword123"),
-        is_superuser=True
-    )
-    async_session.add(user)
-    await async_session.commit()
-    await async_session.refresh(user)
-    return user
-
-
-@pytest_asyncio.fixture
-async def test_post(async_session: AsyncSession, test_user: User) -> Post:
-    """Create a test post."""
-    post = Post(
-        title=fake.sentence(),
-        content=fake.text(),
-        created_by_user_id=test_user.id
-    )
-    async_session.add(post)
-    await async_session.commit()
-    await async_session.refresh(post)
-    return post
-
-
-@pytest_asyncio.fixture
-async def auth_headers(async_client: AsyncClient, test_user: User) -> dict:
-    """Get authentication headers for a test user."""
-    login_data = {
-        "username": test_user.username,
-        "password": "testpassword123"
+def build_user_create_payload(**overrides) -> dict:
+    return {
+        "name": fake.name(),
+        "username": fake.user_name(),
+        "email": fake.email(),
+        "password": "TestPass123!",
+        **overrides,
     }
-    
-    response = await async_client.post("/api/v1/auth/login", data=login_data)
-    token = response.json()["access_token"]
-    
-    return {"Authorization": f"Bearer {token}"}
+```
 
+### Authenticating as a Specific User
 
+Because session auth is cookie-based, the client retains the session for subsequent requests. For tests that need a logged-in superuser without going through the registration flow, seed a superuser directly via the service:
+
+```python
+# tests/conftest.py (additional fixture)
 @pytest_asyncio.fixture
-async def superuser_headers(async_client: AsyncClient, test_superuser: User) -> dict:
-    """Get authentication headers for a test superuser."""
-    login_data = {
-        "username": test_superuser.username,
-        "password": "superpassword123"
-    }
-    
-    response = await async_client.post("/api/v1/auth/login", data=login_data)
-    token = response.json()["access_token"]
-    
-    return {"Authorization": f"Bearer {token}"}
+async def superuser_client(client, db_session):
+    service = UserService()
+    await service.create(
+        payload={
+            "name": "Super",
+            "username": "super",
+            "email": "super@test.com",
+            "password": "SuperPass123!",
+        },
+        db=db_session,
+    )
+    # Manually flip is_superuser via crud_users.update if your service doesn't expose it
+    await db_session.commit()
+
+    await client.post("/api/v1/auth/login",
+                      json={"username": "super", "password": "SuperPass123!"})
+    yield client
 ```
 
-## Unit Tests
+Then `superuser_client` is a logged-in `AsyncClient` for any test that needs admin access.
 
-### Model Tests
+### Resetting the Session Between Tests
+
+By default, `httpx.AsyncClient` carries cookies for the lifetime of the client fixture. Since `client` is function-scoped, each test starts with no session. If you ever need to log out mid-test, call `await client.post("/api/v1/auth/logout/")` or clear cookies via `client.cookies.clear()`.
+
+## CSRF in Tests
+
+If `CSRF_ENABLED=true` (the default), state-changing requests need a CSRF token. The boilerplate's CSRF flow uses double-submit cookies — the server sets a cookie, and you echo the value back in a header.
+
+Either:
+
+- **Disable CSRF in the test environment** by setting `CSRF_ENABLED=false` in the test fixture. Quick and pragmatic for service-layer integration tests where CSRF isn't the focus.
+- **Honor the flow** for tests that need to assert it works:
+  ```python
+  # Hit a GET first so the server sets the CSRF cookie
+  await client.get("/api/v1/auth/me/")  # any safe endpoint
+  csrf_token = client.cookies["csrf_token"]   # cookie name from your config
+  response = await client.post(
+      "/api/v1/widgets/",
+      json={...},
+      headers={"X-CSRF-Token": csrf_token},
+  )
+  ```
+
+See [Authentication → Sessions](authentication/sessions.md) for the CSRF specifics.
+
+## Testing Cached Endpoints
+
+The `@cache` decorator is process-aware: in tests, it talks to whichever cache backend `CACHE_BACKEND` points at. Two strategies:
+
+- **Disable caching** — `CACHE_ENABLED=false` in the test environment. Simplest. The decorator becomes a no-op.
+- **Use a local Redis** — point `CACHE_REDIS_HOST` at `localhost` (or a testcontainer). Useful when the test specifically asserts caching behavior.
+
+For most unit/integration tests, disable. Add explicit cache tests under `tests/integration/` only when you need to verify invalidation behavior.
+
+## Testing Background Tasks
+
+Taskiq tasks shouldn't actually run during tests. Use Taskiq's `InMemoryBroker` to make `.kiq()` calls execute synchronously:
 
 ```python
-# tests/test_models.py
-import pytest
-from datetime import datetime
-from src.app.models.user import User
-from src.app.models.post import Post
+# tests/conftest.py (additional)
+from taskiq import InMemoryBroker
 
+from infrastructure.taskiq import default_broker as real_broker
 
-@pytest.mark.unit
-class TestUserModel:
-    """Test User model functionality."""
-    
-    async def test_user_creation(self, async_session):
-        """Test creating a user."""
-        user = User(
-            name="Test User",
-            username="testuser",
-            email="test@example.com",
-            hashed_password="hashed_password"
-        )
-        
-        async_session.add(user)
-        await async_session.commit()
-        await async_session.refresh(user)
-        
-        assert user.id is not None
-        assert user.name == "Test User"
-        assert user.username == "testuser"
-        assert user.email == "test@example.com"
-        assert user.created_at is not None
-        assert user.is_superuser is False
-        assert user.is_deleted is False
-    
-    async def test_user_relationships(self, async_session, test_user):
-        """Test user relationships."""
-        post = Post(
-            title="Test Post",
-            content="Test content",
-            created_by_user_id=test_user.id
-        )
-        
-        async_session.add(post)
-        await async_session.commit()
-        
-        # Test relationship
-        await async_session.refresh(test_user)
-        assert len(test_user.posts) == 1
-        assert test_user.posts[0].title == "Test Post"
-
-
-@pytest.mark.unit
-class TestPostModel:
-    """Test Post model functionality."""
-    
-    async def test_post_creation(self, async_session, test_user):
-        """Test creating a post."""
-        post = Post(
-            title="Test Post",
-            content="This is test content",
-            created_by_user_id=test_user.id
-        )
-        
-        async_session.add(post)
-        await async_session.commit()
-        await async_session.refresh(post)
-        
-        assert post.id is not None
-        assert post.title == "Test Post"
-        assert post.content == "This is test content"
-        assert post.created_by_user_id == test_user.id
-        assert post.created_at is not None
-        assert post.is_deleted is False
+@pytest_asyncio.fixture(autouse=True)
+async def in_memory_broker(monkeypatch):
+    test_broker = InMemoryBroker()
+    monkeypatch.setattr("infrastructure.taskiq.brokers.default_broker", test_broker)
+    monkeypatch.setattr("infrastructure.taskiq.default_broker", test_broker)
+    yield test_broker
 ```
 
-### Schema Tests
+Now `await my_task.kiq(...)` runs the task body in the test process. For tests that specifically assert "the task was scheduled" without running it, swap to a mock broker that records calls instead.
 
-```python
-# tests/test_schemas.py
-import pytest
-from pydantic import ValidationError
-from src.app.schemas.user import UserCreate, UserRead, UserUpdate
-from src.app.schemas.post import PostCreate, PostRead, PostUpdate
-
-
-@pytest.mark.unit
-class TestUserSchemas:
-    """Test User schema validation."""
-    
-    def test_user_create_valid(self):
-        """Test valid user creation schema."""
-        user_data = {
-            "name": "John Doe",
-            "username": "johndoe",
-            "email": "john@example.com",
-            "password": "SecurePass123!"
-        }
-        
-        user = UserCreate(**user_data)
-        assert user.name == "John Doe"
-        assert user.username == "johndoe"
-        assert user.email == "john@example.com"
-        assert user.password == "SecurePass123!"
-    
-    def test_user_create_invalid_email(self):
-        """Test invalid email validation."""
-        with pytest.raises(ValidationError) as exc_info:
-            UserCreate(
-                name="John Doe",
-                username="johndoe",
-                email="invalid-email",
-                password="SecurePass123!"
-            )
-        
-        errors = exc_info.value.errors()
-        assert any(error['type'] == 'value_error' for error in errors)
-    
-    def test_user_create_short_password(self):
-        """Test password length validation."""
-        with pytest.raises(ValidationError) as exc_info:
-            UserCreate(
-                name="John Doe",
-                username="johndoe",
-                email="john@example.com",
-                password="123"
-            )
-        
-        errors = exc_info.value.errors()
-        assert any(error['type'] == 'value_error' for error in errors)
-    
-    def test_user_update_partial(self):
-        """Test partial user update."""
-        update_data = {"name": "Jane Doe"}
-        user_update = UserUpdate(**update_data)
-        
-        assert user_update.name == "Jane Doe"
-        assert user_update.username is None
-        assert user_update.email is None
-
-
-@pytest.mark.unit
-class TestPostSchemas:
-    """Test Post schema validation."""
-    
-    def test_post_create_valid(self):
-        """Test valid post creation."""
-        post_data = {
-            "title": "Test Post",
-            "content": "This is a test post content"
-        }
-        
-        post = PostCreate(**post_data)
-        assert post.title == "Test Post"
-        assert post.content == "This is a test post content"
-    
-    def test_post_create_empty_title(self):
-        """Test empty title validation."""
-        with pytest.raises(ValidationError):
-            PostCreate(
-                title="",
-                content="This is a test post content"
-            )
-    
-    def test_post_create_long_title(self):
-        """Test title length validation."""
-        with pytest.raises(ValidationError):
-            PostCreate(
-                title="x" * 101,  # Exceeds max length
-                content="This is a test post content"
-            )
-```
-
-### CRUD Tests
-
-```python
-# tests/test_crud.py
-import pytest
-from src.app.crud.crud_users import crud_users
-from src.app.crud.crud_posts import crud_posts
-from src.app.schemas.user import UserCreate, UserUpdate
-from src.app.schemas.post import PostCreate, PostUpdate
-
-
-@pytest.mark.unit
-class TestUserCRUD:
-    """Test User CRUD operations."""
-    
-    async def test_create_user(self, async_session):
-        """Test creating a user."""
-        user_data = UserCreate(
-            name="CRUD User",
-            username="cruduser",
-            email="crud@example.com",
-            password="password123"
-        )
-        
-        user = await crud_users.create(db=async_session, object=user_data)
-        assert user["name"] == "CRUD User"
-        assert user["username"] == "cruduser"
-        assert user["email"] == "crud@example.com"
-        assert "id" in user
-    
-    async def test_get_user(self, async_session, test_user):
-        """Test getting a user."""
-        retrieved_user = await crud_users.get(
-            db=async_session, 
-            id=test_user.id
-        )
-        
-        assert retrieved_user is not None
-        assert retrieved_user["id"] == test_user.id
-        assert retrieved_user["name"] == test_user.name
-        assert retrieved_user["username"] == test_user.username
-    
-    async def test_get_user_by_email(self, async_session, test_user):
-        """Test getting a user by email."""
-        retrieved_user = await crud_users.get(
-            db=async_session,
-            email=test_user.email
-        )
-        
-        assert retrieved_user is not None
-        assert retrieved_user["email"] == test_user.email
-    
-    async def test_update_user(self, async_session, test_user):
-        """Test updating a user."""
-        update_data = UserUpdate(name="Updated Name")
-        
-        updated_user = await crud_users.update(
-            db=async_session,
-            object=update_data,
-            id=test_user.id
-        )
-        
-        assert updated_user["name"] == "Updated Name"
-        assert updated_user["id"] == test_user.id
-    
-    async def test_delete_user(self, async_session, test_user):
-        """Test soft deleting a user."""
-        await crud_users.delete(db=async_session, id=test_user.id)
-        
-        # User should be soft deleted
-        deleted_user = await crud_users.get(
-            db=async_session,
-            id=test_user.id,
-            is_deleted=True
-        )
-        
-        assert deleted_user is not None
-        assert deleted_user["is_deleted"] is True
-    
-    async def test_get_multi_users(self, async_session):
-        """Test getting multiple users."""
-        # Create multiple users
-        for i in range(5):
-            user_data = UserCreate(
-                name=f"User {i}",
-                username=f"user{i}",
-                email=f"user{i}@example.com",
-                password="password123"
-            )
-            await crud_users.create(db=async_session, object=user_data)
-        
-        # Get users with pagination
-        result = await crud_users.get_multi(
-            db=async_session,
-            offset=0,
-            limit=3
-        )
-        
-        assert len(result["data"]) == 3
-        assert result["total_count"] == 5
-        assert result["has_more"] is True
-
-
-@pytest.mark.unit
-class TestPostCRUD:
-    """Test Post CRUD operations."""
-    
-    async def test_create_post(self, async_session, test_user):
-        """Test creating a post."""
-        post_data = PostCreate(
-            title="Test Post",
-            content="This is test content"
-        )
-        
-        post = await crud_posts.create(
-            db=async_session,
-            object=post_data,
-            created_by_user_id=test_user.id
-        )
-        
-        assert post["title"] == "Test Post"
-        assert post["content"] == "This is test content"
-        assert post["created_by_user_id"] == test_user.id
-    
-    async def test_get_posts_by_user(self, async_session, test_user):
-        """Test getting posts by user."""
-        # Create multiple posts
-        for i in range(3):
-            post_data = PostCreate(
-                title=f"Post {i}",
-                content=f"Content {i}"
-            )
-            await crud_posts.create(
-                db=async_session,
-                object=post_data,
-                created_by_user_id=test_user.id
-            )
-        
-        # Get posts by user
-        result = await crud_posts.get_multi(
-            db=async_session,
-            created_by_user_id=test_user.id
-        )
-        
-        assert len(result["data"]) == 3
-        assert result["total_count"] == 3
-```
-
-## Integration Tests
-
-### API Endpoint Tests
-
-```python
-# tests/test_api_users.py
-import pytest
-from httpx import AsyncClient
-
-
-@pytest.mark.integration
-class TestUserAPI:
-    """Test User API endpoints."""
-    
-    async def test_create_user(self, async_client: AsyncClient):
-        """Test user creation endpoint."""
-        user_data = {
-            "name": "New User",
-            "username": "newuser",
-            "email": "new@example.com",
-            "password": "SecurePass123!"
-        }
-        
-        response = await async_client.post("/api/v1/users", json=user_data)
-        assert response.status_code == 201
-        
-        data = response.json()
-        assert data["name"] == "New User"
-        assert data["username"] == "newuser"
-        assert data["email"] == "new@example.com"
-        assert "hashed_password" not in data
-        assert "id" in data
-    
-    async def test_create_user_duplicate_email(self, async_client: AsyncClient, test_user):
-        """Test creating user with duplicate email."""
-        user_data = {
-            "name": "Duplicate User",
-            "username": "duplicateuser",
-            "email": test_user.email,  # Use existing email
-            "password": "SecurePass123!"
-        }
-        
-        response = await async_client.post("/api/v1/users", json=user_data)
-        assert response.status_code == 409  # Conflict
-    
-    async def test_get_users(self, async_client: AsyncClient):
-        """Test getting users list."""
-        response = await async_client.get("/api/v1/users")
-        assert response.status_code == 200
-        
-        data = response.json()
-        assert "data" in data
-        assert "total_count" in data
-        assert "has_more" in data
-        assert isinstance(data["data"], list)
-    
-    async def test_get_user_by_id(self, async_client: AsyncClient, test_user):
-        """Test getting specific user."""
-        response = await async_client.get(f"/api/v1/users/{test_user.id}")
-        assert response.status_code == 200
-        
-        data = response.json()
-        assert data["id"] == test_user.id
-        assert data["name"] == test_user.name
-        assert data["username"] == test_user.username
-    
-    async def test_get_user_not_found(self, async_client: AsyncClient):
-        """Test getting non-existent user."""
-        response = await async_client.get("/api/v1/users/99999")
-        assert response.status_code == 404
-    
-    async def test_update_user_authorized(self, async_client: AsyncClient, test_user, auth_headers):
-        """Test updating user with proper authorization."""
-        update_data = {"name": "Updated Name"}
-        
-        response = await async_client.patch(
-            f"/api/v1/users/{test_user.id}",
-            json=update_data,
-            headers=auth_headers
-        )
-        assert response.status_code == 200
-        
-        data = response.json()
-        assert data["name"] == "Updated Name"
-        assert data["id"] == test_user.id
-    
-    async def test_update_user_unauthorized(self, async_client: AsyncClient, test_user):
-        """Test updating user without authorization."""
-        update_data = {"name": "Updated Name"}
-        
-        response = await async_client.patch(
-            f"/api/v1/users/{test_user.id}",
-            json=update_data
-        )
-        assert response.status_code == 401
-    
-    async def test_delete_user_superuser(self, async_client: AsyncClient, test_user, superuser_headers):
-        """Test deleting user as superuser."""
-        response = await async_client.delete(
-            f"/api/v1/users/{test_user.id}",
-            headers=superuser_headers
-        )
-        assert response.status_code == 200
-    
-    async def test_delete_user_forbidden(self, async_client: AsyncClient, test_user, auth_headers):
-        """Test deleting user without superuser privileges."""
-        response = await async_client.delete(
-            f"/api/v1/users/{test_user.id}",
-            headers=auth_headers
-        )
-        assert response.status_code == 403
-
-
-@pytest.mark.integration
-class TestAuthAPI:
-    """Test Authentication API endpoints."""
-    
-    async def test_login_success(self, async_client: AsyncClient, test_user):
-        """Test successful login."""
-        login_data = {
-            "username": test_user.username,
-            "password": "testpassword123"
-        }
-        
-        response = await async_client.post("/api/v1/auth/login", data=login_data)
-        assert response.status_code == 200
-        
-        data = response.json()
-        assert "access_token" in data
-        assert "refresh_token" in data
-        assert data["token_type"] == "bearer"
-    
-    async def test_login_invalid_credentials(self, async_client: AsyncClient, test_user):
-        """Test login with invalid credentials."""
-        login_data = {
-            "username": test_user.username,
-            "password": "wrongpassword"
-        }
-        
-        response = await async_client.post("/api/v1/auth/login", data=login_data)
-        assert response.status_code == 401
-    
-    async def test_get_current_user(self, async_client: AsyncClient, test_user, auth_headers):
-        """Test getting current user information."""
-        response = await async_client.get("/api/v1/auth/me", headers=auth_headers)
-        assert response.status_code == 200
-        
-        data = response.json()
-        assert data["id"] == test_user.id
-        assert data["username"] == test_user.username
-    
-    async def test_refresh_token(self, async_client: AsyncClient, test_user):
-        """Test token refresh."""
-        # First login to get refresh token
-        login_data = {
-            "username": test_user.username,
-            "password": "testpassword123"
-        }
-        
-        login_response = await async_client.post("/api/v1/auth/login", data=login_data)
-        refresh_token = login_response.json()["refresh_token"]
-        
-        # Use refresh token to get new access token
-        refresh_response = await async_client.post(
-            "/api/v1/auth/refresh",
-            headers={"Authorization": f"Bearer {refresh_token}"}
-        )
-        
-        assert refresh_response.status_code == 200
-        data = refresh_response.json()
-        assert "access_token" in data
-```
-
-## Running Tests
-
-### Basic Test Commands
+## Running the Suite
 
 ```bash
-# Run all tests
+cd backend
+
+# Run everything
 uv run pytest
 
-# Run specific test categories
+# Just unit tests (skip the slower integration ones)
 uv run pytest -m unit
+
+# Just integration tests
 uv run pytest -m integration
-uv run pytest -m api
 
-# Run tests with coverage
-uv run pytest --cov=src --cov-report=html
-
-# Run tests in parallel
-uv run pytest -n auto
-
-# Run specific test file
-uv run pytest tests/test_api_users.py
-
-# Run with verbose output
-uv run pytest -v
-
-# Run tests matching pattern
-uv run pytest -k "test_user"
-
-# Run tests and stop on first failure
+# Stop on first failure
 uv run pytest -x
 
-# Run slow tests
-uv run pytest -m slow
+# Keep running on failures, show output for tests matching a name
+uv run pytest -k "user_login" -v
+
+# Parallel via pytest-xdist
+uv run pytest -n auto
+
+# With coverage (after `uv add --dev pytest-cov`)
+uv run pytest --cov=src --cov-report=term-missing
 ```
 
-### Test Environment Setup
+## Continuous Integration
 
-```bash
-# Set up test database
-createdb test_db
+The repo's `.github/workflows/tests.yml` runs the test suite on PRs (along with linting and type-checking workflows). All three workflows pin the working directory to `backend/` so the same `uv run pytest` works there as locally.
 
-# Run tests with specific environment
-ENVIRONMENT=testing uv run pytest
+CI runs in a clean image, which means:
 
-# Run tests with debug output
-uv run pytest -s --log-cli-level=DEBUG
-```
+- **No Docker access by default** — testcontainers needs `docker` available. Either:
+  - Use the `services:` block in the workflow to start a Postgres container, then point your test conftest at it via env vars
+  - Or skip integration tests in CI and run them manually before each release
+- **Connections to localhost are sandboxed** — anything connecting outside the runner needs explicit network setup
 
-## Testing Best Practices
+For most teams, running unit tests in CI and integration tests locally / on a periodic schedule is enough.
 
-### Test Organization
+## Common Mistakes
 
-- **Separate concerns**: Unit tests for business logic, integration tests for API endpoints
-- **Use fixtures**: Create reusable test data and setup
-- **Test isolation**: Each test should be independent
-- **Clear naming**: Test names should describe what they're testing
+### "My test isn't actually using the test database"
 
-### Test Data
+Check that `app.dependency_overrides[async_session] = ...` matches the **same callable** the routes depend on. If a route does `Depends(some_other_db_dep)`, your override of `async_session` won't take effect. Look at the route's source.
 
-- **Use factories**: Create test data programmatically
-- **Avoid hardcoded values**: Use variables and constants
-- **Clean up**: Ensure tests don't leave data behind
-- **Realistic data**: Use faker or similar libraries for realistic test data
+### "Tests pass individually but fail when run together"
 
-### Assertions
+The most common cause: shared state in the database between tests. Either:
 
-- **Specific assertions**: Test specific behaviors, not just "it works"
-- **Multiple assertions**: Test all relevant aspects of the response
-- **Error cases**: Test error conditions and edge cases
-- **Performance**: Include performance tests for critical paths
+- Make every test fixture roll back at the end (the `db_session` fixture above does)
+- Use `truncate` between tests instead of `create_all` / `drop_all` (faster on big schemas)
 
-### Mocking
+### "Async tests hang"
 
-```python
-# Example of mocking external dependencies
-from unittest.mock import patch, AsyncMock
+Almost always missing `asyncio_mode = "auto"` in `pyproject.toml`, or a fixture that's `async def` but not `pytest_asyncio.fixture`-decorated. Both must match.
 
-@pytest.mark.unit
-async def test_external_api_call():
-    """Test function that calls external API."""
-    with patch('src.app.services.external_api.make_request') as mock_request:
-        mock_request.return_value = {"status": "success"}
-        
-        result = await some_function_that_calls_external_api()
-        
-        assert result["status"] == "success"
-        mock_request.assert_called_once()
-```
+### "Cookies aren't persisting between test calls"
 
-### Continuous Integration
+`httpx.AsyncClient` only keeps cookies if both calls go through the **same** client instance. If you create a new `AsyncClient` per request, you lose the session. Use the fixture client.
 
-```yaml
-# .github/workflows/test.yml
-name: Tests
+### "FastCRUD returns dicts, not models, in tests too"
 
-on: [push, pull_request]
+Yes — that's the design. Don't try to `assert isinstance(result, Widget)`. Assert on dict keys: `assert result["name"] == "..."`.
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_USER: test_user
-          POSTGRES_PASSWORD: test_pass
-          POSTGRES_DB: test_db
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    
-    steps:
-    - uses: actions/checkout@v3
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: 3.11
-    
-    - name: Install dependencies
-      run: |
-        pip install uv
-        uv sync
-    
-    - name: Run tests
-      run: uv run pytest --cov=src --cov-report=xml
-    
-    - name: Upload coverage
-      uses: codecov/codecov-action@v3
-      with:
-        file: ./coverage.xml
-```
+### "Test database has stale schema after model changes"
 
-This testing guide provides comprehensive coverage of testing strategies for the FastAPI boilerplate, ensuring reliable and maintainable code. 
+If you're using the `Base.metadata.create_all` shortcut (as in the conftest above), the schema rebuilds on every session. If you've added a fixture that rebuilds at module scope, restart the test session. For long-running test databases, run Alembic migrations in the fixture instead.
+
+## Key Files
+
+| Component                | Location                                                    |
+|--------------------------|-------------------------------------------------------------|
+| Pytest config            | `backend/pyproject.toml` (`[tool.pytest.ini_options]`)      |
+| Test root                | `tests/`                                                    |
+| Module under test (refs) | `backend/src/modules/user/`, `backend/src/modules/tier/`    |
+| Settings (test env)      | `backend/src/infrastructure/config/settings.py`             |
+| Models / `Base`          | `backend/src/infrastructure/database/models.py`             |
+
+## Next Steps
+
+- **[Development](development.md)** — broader development workflow
+- **[Production](production.md)** — what changes when shipping the test suite to CI
+- **[Authentication → Sessions](authentication/sessions.md)** — full session/CSRF flow you'll exercise in tests

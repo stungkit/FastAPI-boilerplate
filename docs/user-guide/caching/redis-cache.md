@@ -1,359 +1,329 @@
-# Redis Cache
+# Server-Side Cache (Redis or Memcached)
 
-Redis-based server-side caching provides fast, in-memory storage for API responses. The boilerplate includes a sophisticated caching decorator that automatically handles cache storage, retrieval, and invalidation.
+Server-side caching stores responses keyed by request shape so subsequent identical requests skip the database. This page covers the `@cache` decorator and the provider API.
 
-## Understanding Redis Caching
+The same code works against Redis or Memcached — pick via `CACHE_BACKEND`. The "Redis" label on this page is historical; everything below works for both backends unless explicitly called out.
 
-Redis serves as a high-performance cache layer between your API and database. When properly implemented, it can reduce response times from hundreds of milliseconds to single-digit milliseconds by serving data directly from memory.
+## The `@cache` Decorator
 
-### Why Redis?
-
-**Performance**: In-memory storage provides sub-millisecond data access
-**Scalability**: Handles thousands of concurrent connections efficiently  
-**Persistence**: Optional data persistence for cache warm-up after restarts
-**Atomic Operations**: Thread-safe operations for concurrent applications
-**Pattern Matching**: Advanced key pattern operations for bulk cache invalidation
-
-## Cache Decorator
-
-The `@cache` decorator provides a simple interface for adding caching to any FastAPI endpoint.
+The decorator handles caching for GET endpoints and invalidation for mutations.
 
 ### Basic Usage
 
 ```python
-from fastapi import APIRouter, Request, Depends
-from sqlalchemy.orm import Session
-from app.core.utils.cache import cache
-from app.core.db.database import get_db
+from typing import Annotated, Any
+from fastapi import APIRouter, Depends, Request
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ...infrastructure.cache import cache
+from ...infrastructure.database.session import async_session
+from .schemas import WidgetRead
+from .service import WidgetService
 
 router = APIRouter()
 
-@router.get("/posts/{post_id}")
-@cache(key_prefix="post_cache", expiration=3600)
-async def get_post(request: Request, post_id: int, db: Session = Depends(get_db)):
-    # This function's result will be cached for 1 hour
-    post = await crud_posts.get(db=db, id=post_id)
-    return post
+
+@router.get("/{widget_id}", response_model=WidgetRead)
+@cache(key_prefix="widget", resource_id_name="widget_id", expiration=600)
+async def get_widget(
+    request: Request,
+    widget_id: int,
+    db: Annotated[AsyncSession, Depends(async_session)],
+    widget_service: Annotated[WidgetService, Depends(get_widget_service)],
+) -> dict[str, Any]:
+    return await widget_service.get_by_id(widget_id, db)
 ```
 
-**How It Works:**
+The decorator builds the cache key as `widget:{widget_id}`. On cache hits, the handler doesn't run — the cached value is returned directly.
 
-1. **Cache Check**: On GET requests, checks Redis for existing cached data
-2. **Cache Miss**: If no cache exists, executes the function and stores the result
-3. **Cache Hit**: Returns cached data directly, bypassing function execution
-4. **Invalidation**: Automatically removes cache on non-GET requests (POST, PUT, DELETE)
+!!! warning "`request: Request` is required"
+    The decorator inspects `request.method` to decide whether to read or invalidate. The first parameter of every decorated route must be `request: Request`. Without it the decorator raises an error.
+
+### How It Works
+
+1. **GET requests**: check the cache → return on hit, run the handler + cache the response on miss
+2. **PUT/PATCH/POST/DELETE**: run the handler, then **delete** the cache key for the same `(key_prefix, resource_id)`. Optional extras (`to_invalidate_extra`, `pattern_to_invalidate_extra`) trigger additional invalidations
+3. **Fail-open**: if the cache backend errors out, the decorator logs a warning and falls through to run the handler. Your endpoint stays available
 
 ### Decorator Parameters
 
 ```python
 @cache(
-    key_prefix: str,                                    # Cache key prefix
-    resource_id_name: str = None,                       # Explicit resource ID parameter
-    expiration: int = 3600,                             # Cache TTL in seconds
-    resource_id_type: type | tuple[type, ...] = int,    # Expected ID type
-    to_invalidate_extra: dict[str, str] = None,         # Additional keys to invalidate
-    pattern_to_invalidate_extra: list[str] = None       # Pattern-based invalidation
+    key_prefix: str,                                  # required — cache namespace
+    resource_id_name: Any = None,                     # name of the parameter holding the resource ID
+    expiration: int = 3600,                           # TTL in seconds (default: 1 hour)
+    resource_id_type: type | tuple[type, ...] = int,  # expected type when auto-inferring
+    to_invalidate_extra: dict[str, Any] | None = None,
+    pattern_to_invalidate_extra: list[str] | None = None,
+    backend_name: str | None = None,                  # if you've registered multiple backends
 )
 ```
 
-#### Key Prefix
+### `key_prefix` — Cache Namespace
 
-The key prefix creates unique cache identifiers:
+The prefix can use `{kwarg_name}` placeholders to interpolate route parameters:
 
 ```python
-# Simple prefix
-@cache(key_prefix="user_data")
-# Generates keys like: "user_data:123"
+@cache(key_prefix="widget", ...)
+# → "widget:42"
 
-# Dynamic prefix with placeholders
-@cache(key_prefix="{username}_posts")  
-# Generates keys like: "johndoe_posts:456"
+@cache(key_prefix="user_{username}_widgets", ...)
+# → "user_johndoe_widgets:42"
 
-# Complex prefix with multiple parameters
-@cache(key_prefix="user_{user_id}_posts_page_{page}")
-# Generates keys like: "user_123_posts_page_2:789"
+@cache(key_prefix="user_{user_id}_widgets:page_{page}:size_{items_per_page}", ...)
+# → "user_5_widgets:page_1:size_10:42"
 ```
 
-#### Resource ID Handling
+The `{...}` placeholders are interpolated from the route handler's keyword arguments (path/query parameters and dependencies).
+
+### `resource_id_name` — Which Argument is the ID
+
+The decorator appends `:{resource_id}` to the prefix. Resource ID resolution:
 
 ```python
-# Automatic ID inference (looks for 'id' parameter)
-@cache(key_prefix="post_cache")
-async def get_post(request: Request, post_id: int):
-    # Uses post_id automatically
+# Explicit — recommended
+@cache(key_prefix="widget", resource_id_name="widget_id", expiration=600)
+async def get_widget(request: Request, widget_id: int, ...): ...
 
-# Explicit ID parameter
-@cache(key_prefix="user_cache", resource_id_name="username")
-async def get_user(request: Request, username: str):
-    # Uses username instead of looking for 'id'
+# Implicit — the decorator infers from the kwargs (looks for an int argument by default)
+@cache(key_prefix="widget", expiration=600)
+async def get_widget(request: Request, widget_id: int, ...): ...
 
-# Multiple ID types
-@cache(key_prefix="search", resource_id_type=(int, str))
-async def search(request: Request, query: str, page: int):
-    # Accepts either string or int as resource ID
+# String IDs — set resource_id_type
+@cache(key_prefix="user", resource_id_name="username", resource_id_type=str)
+async def get_user(request: Request, username: str, ...): ...
 ```
 
-### Advanced Caching Patterns
+If the decorator can't infer a resource ID, it logs a warning and skips caching for that request — the handler still runs normally.
 
-#### Paginated Data Caching
+## Invalidation
+
+### Automatic on Mutations
+
+Any non-GET method on a route decorated with the same `(key_prefix, resource_id_name)` automatically invalidates that key:
 
 ```python
-@router.get("/users/{username}/posts")
+@router.patch("/{widget_id}")
+@cache(key_prefix="widget", resource_id_name="widget_id")
+async def update_widget(request: Request, widget_id: int, ...) -> dict[str, Any]:
+    # PATCH automatically deletes "widget:{widget_id}" after the handler runs
+    return await widget_service.update(widget_id, values, db)
+```
+
+The cache deletion happens **after** the handler returns successfully. If the handler raises, the cache isn't touched.
+
+### Invalidating Related Keys (`to_invalidate_extra`)
+
+When mutating a resource, you often need to invalidate other caches that reference it. Use `to_invalidate_extra` — a dict of `{prefix: id_kwarg}`:
+
+```python
+@router.post("/")
 @cache(
-    key_prefix="{username}_posts:page_{page}:items_per_page_{items_per_page}",
-    resource_id_name="username",
-    expiration=300  # 5 minutes for paginated data
-)
-async def get_user_posts(
-    request: Request,
-    username: str,
-    page: int = 1,
-    items_per_page: int = 10
-):
-    offset = compute_offset(page, items_per_page)
-    posts = await crud_posts.get_multi(
-        db=db,
-        offset=offset,
-        limit=items_per_page,
-        created_by_user_id=user_id
-    )
-    return paginated_response(posts, page, items_per_page)
-```
-
-#### Hierarchical Data Caching
-
-```python
-@router.get("/organizations/{org_id}/departments/{dept_id}/employees")
-@cache(
-    key_prefix="org_{org_id}_dept_{dept_id}_employees",
-    resource_id_name="dept_id",
-    expiration=1800  # 30 minutes
-)
-async def get_department_employees(
-    request: Request,
-    org_id: int,
-    dept_id: int
-):
-    employees = await crud_employees.get_multi(
-        db=db,
-        department_id=dept_id,
-        organization_id=org_id
-    )
-    return employees
-```
-
-## Cache Invalidation
-
-Cache invalidation ensures data consistency when the underlying data changes.
-
-### Automatic Invalidation
-
-The cache decorator automatically invalidates cache entries on non-GET requests:
-
-```python
-@router.put("/posts/{post_id}")
-@cache(key_prefix="post_cache", resource_id_name="post_id")
-async def update_post(request: Request, post_id: int, data: PostUpdate):
-    # Automatically invalidates "post_cache:123" when called with PUT/POST/DELETE
-    await crud_posts.update(db=db, id=post_id, object=data)
-    return {"message": "Post updated"}
-```
-
-### Extra Key Invalidation
-
-Invalidate related cache entries when data changes:
-
-```python
-@router.post("/posts")
-@cache(
-    key_prefix="new_post",
-    resource_id_name="user_id", 
+    key_prefix="widget",
+    resource_id_name="widget_id",
     to_invalidate_extra={
-        "user_posts": "{user_id}",           # Invalidate user's post list
-        "latest_posts": "global",            # Invalidate global latest posts
-        "user_stats": "{user_id}"            # Invalidate user statistics
-    }
+        "user_widgets": "owner_id",      # also invalidate "user_widgets:{owner_id}"
+        "widget_count": "global",        # invalidate "widget_count:global"
+    },
 )
-async def create_post(request: Request, post: PostCreate, user_id: int):
-    # Creating a post invalidates related cached data
-    new_post = await crud_posts.create(db=db, object=post)
-    return new_post
+async def create_widget(
+    request: Request,
+    widget: WidgetCreate,
+    owner_id: int,
+    ...,
+) -> dict[str, Any]:
+    return await widget_service.create(widget, owner_id, db)
 ```
 
-### Pattern-Based Invalidation
+The `id_kwarg` value can be a literal (like `"global"`) or a placeholder reference (`"owner_id"` resolves from the route's kwargs).
 
-Use Redis pattern matching for bulk invalidation:
+!!! note "Only on mutations"
+    `to_invalidate_extra` and `pattern_to_invalidate_extra` are not allowed on GET routes — the decorator raises `InvalidRequestError` if you try. Cache invalidation only happens on PUT/PATCH/POST/DELETE.
+
+### Pattern-Based Invalidation (`pattern_to_invalidate_extra`)
+
+For bulk wipes, use Redis pattern matching:
 
 ```python
-@router.put("/users/{user_id}/profile")
+@router.delete("/{widget_id}")
 @cache(
-    key_prefix="user_profile",
-    resource_id_name="user_id",
+    key_prefix="widget",
+    resource_id_name="widget_id",
     pattern_to_invalidate_extra=[
-        "user_{user_id}_*",          # All user-related caches
-        "*_user_{user_id}_*",        # Caches that include this user
-        "search_results_*"           # All search result caches
-    ]
+        "user_{owner_id}_widgets:*",       # all paginated lists for this user
+        "widget_search:*",                  # all search result caches
+    ],
 )
-async def update_user_profile(request: Request, user_id: int, data: UserUpdate):
-    # Invalidates all matching cache patterns
-    await crud_users.update(db=db, id=user_id, object=data)
-    return {"message": "Profile updated"}
+async def delete_widget(
+    request: Request,
+    widget_id: int,
+    owner_id: int,
+    ...,
+) -> None:
+    await widget_service.delete(widget_id, db)
 ```
 
-**Pattern Examples:**
+**Memcached doesn't support patterns.** When `CACHE_BACKEND=memcached`, `pattern_to_invalidate_extra` raises `PatternMatchingNotSupportedError` (logged at error level). The non-pattern delete still happens.
 
-- `user_*` - All keys starting with "user_"
-- `*_posts` - All keys ending with "_posts"  
-- `user_*_posts_*` - Complex patterns with wildcards
-- `temp_*` - Temporary cache entries
+## The Provider API
+
+For cache operations outside of routes (background jobs, services, scripts), use the provider API directly:
+
+```python
+from src.infrastructure.cache import (
+    cache_provider,
+    clear,
+    delete,
+    delete_pattern,
+    exists,
+    get,
+    set,
+)
+
+
+# Store a value (any JSON-serializable type)
+await set(key="config:site_name", value="My App", expiration=3600)
+
+# Retrieve it
+value = await get(key="config:site_name")
+
+# Existence check
+if await exists(key="config:site_name"):
+    ...
+
+# Delete a key
+await delete(key="config:site_name")
+
+# Delete by pattern (Redis only)
+await delete_pattern(pattern="user:42:*")
+
+# Clear everything
+await clear()
+```
+
+Values are serialized via `fastapi.encoders.jsonable_encoder` automatically — you can store dicts, lists, and any JSON-compatible structure.
+
+## Cache Key Conventions
+
+The decorator generates keys as:
+
+```
+{formatted_key_prefix}:{resource_id}
+```
+
+A few patterns the codebase uses:
+
+| Pattern | Use case |
+|---------|----------|
+| `widget:42` | Single resource by id |
+| `user_widgets:5` | List of a user's widgets |
+| `user_{username}_widgets:page_{page}` | Paginated list scoped to a user |
+| `search:{query_hash}` | Hashed search query |
+| `analytics_{user_id}_30d:report` | Time-windowed analytics |
+
+Pick prefixes that:
+
+1. **Are unique** — never let two unrelated caches collide on the same key
+2. **Match how you'll invalidate** — if you'll wipe by user, include the user identifier
+3. **Are predictable** — anyone debugging should be able to read the key and know what's in it
 
 ## Configuration
 
-### Redis Settings
+```env
+CACHE_ENABLED=true
+CACHE_BACKEND=redis              # or "memcached"
+DEFAULT_CACHE_EXPIRATION=3600
 
-Configure Redis connection in your environment settings:
-
-```python
-# core/config.py
-class RedisCacheSettings(BaseSettings):
-    REDIS_CACHE_HOST: str = config("REDIS_CACHE_HOST", default="localhost")
-    REDIS_CACHE_PORT: int = config("REDIS_CACHE_PORT", default=6379) 
-    REDIS_CACHE_PASSWORD: str = config("REDIS_CACHE_PASSWORD", default="")
-    REDIS_CACHE_DB: int = config("REDIS_CACHE_DB", default=0)
-    REDIS_CACHE_URL: str = f"redis://:{REDIS_CACHE_PASSWORD}@{REDIS_CACHE_HOST}:{REDIS_CACHE_PORT}/{REDIS_CACHE_DB}"
+# Redis backend
+CACHE_REDIS_HOST=redis           # use "localhost" without Docker
+CACHE_REDIS_PORT=6379
+CACHE_REDIS_DB=0
+CACHE_REDIS_PASSWORD=
+CACHE_REDIS_CONNECT_TIMEOUT=5
+CACHE_REDIS_POOL_SIZE=10
 ```
 
-### Environment Variables
+When `CACHE_ENABLED=false`, the decorator becomes a no-op (the handler runs every time). Use this in tests or when isolating performance issues.
 
-```bash
-# Basic Configuration
-REDIS_CACHE_HOST=localhost
-REDIS_CACHE_PORT=6379
+## Picking Expiration Times
 
-# Production Configuration  
-REDIS_CACHE_HOST=redis.production.com
-REDIS_CACHE_PORT=6379
-REDIS_CACHE_PASSWORD=your-secure-password
-REDIS_CACHE_DB=0
+| Data shape | Suggested TTL |
+|------------|---------------|
+| Static reference data (e.g. country list, tier list) | 24 hours (`86400`) |
+| User profile / public objects | 5–30 minutes (`300`–`1800`) |
+| Paginated list endpoints | 1–5 minutes (`60`–`300`) |
+| Search results | 5–15 minutes (`300`–`900`) |
+| Frequently changing dashboards | 30–60 seconds |
 
-# Docker Compose
-REDIS_CACHE_HOST=redis
-REDIS_CACHE_PORT=6379
+Default is 1 hour (`3600`). Override per route based on staleness tolerance.
+
+## Real Examples
+
+The boilerplate doesn't currently use `@cache` on its built-in routes (the existing endpoints are admin/list operations where the data churns enough that caching isn't a clear win). Add `@cache` to your own modules where it pays off — typically: read-heavy GETs on rarely-changing data.
+
+## Performance Tips
+
+### Use `schema_to_select` Together with Caching
+
+When the underlying CRUD call uses `schema_to_select=WidgetRead`, the cached payload is the trimmed dict — smaller cache values, faster serialization on hit.
+
+### Don't Cache Personalized Responses Globally
+
+If your handler returns different data per user but the cache key only includes the resource ID, **users see each other's data**. Either:
+
+- Include `user_id` in the prefix: `key_prefix="widget_for_user_{user_id}"`
+- Don't cache it
+
+### Cache the Response, Not the Computation
+
+The decorator caches the route handler's return value. If you need to cache an expensive sub-computation but not the whole response, use the provider API directly inside your service.
+
+### Watch Pool Saturation
+
+Default `CACHE_REDIS_POOL_SIZE=10` is enough for typical workloads. If you have very high concurrency on cached endpoints, raise it. Watch the application logs for `redis.exceptions.ConnectionError` — that often means pool exhaustion.
+
+## Graceful Degradation
+
+If the cache backend is unreachable, the decorator catches the error and falls through to run the handler. Your endpoint keeps working at non-cached speed. This fail-open behavior is intentional — cached data is reproducible from the database, so cache outages shouldn't take the API down.
+
+You'll see a warning in the logs:
+
+```
+Cache backend not available: <error>
 ```
 
-### Connection Pool Setup
+That's your signal to investigate the cache infrastructure.
 
-The boilerplate automatically configures Redis connection pooling:
+## Troubleshooting
 
-```python
-# core/setup.py
-async def create_redis_cache_pool() -> None:
-    """Initialize Redis connection pool for caching."""
-    cache.pool = redis.ConnectionPool.from_url(
-        settings.REDIS_CACHE_URL,
-        max_connections=20,      # Maximum connections in pool
-        retry_on_timeout=True,   # Retry on connection timeout
-        socket_timeout=5.0,      # Socket timeout in seconds
-        health_check_interval=30 # Health check frequency
-    )
-    cache.client = redis.Redis.from_pool(cache.pool)
-```
+### Decorator never reads from cache
 
-### Cache Client Usage
+Check that `request: Request` is the first parameter of the decorated function. Without it, the decorator can't determine the HTTP method and can't decide whether to cache or invalidate.
 
-Direct Redis client access for custom caching logic:
+### Pattern invalidation fails on Memcached
 
-```python
-from app.core.utils.cache import client
+`PatternMatchingNotSupportedError` is expected — Memcached doesn't support pattern operations. Either switch to Redis or invalidate keys explicitly via `to_invalidate_extra`.
 
-async def custom_cache_operation():
-    if client is None:
-        raise MissingClientError("Redis client not initialized")
-    
-    # Set custom cache entry
-    await client.set("custom_key", "custom_value", ex=3600)
-    
-    # Get cached value
-    cached_value = await client.get("custom_key")
-    
-    # Delete cache entry
-    await client.delete("custom_key")
-    
-    # Bulk operations
-    pipe = client.pipeline()
-    pipe.set("key1", "value1")
-    pipe.set("key2", "value2") 
-    pipe.expire("key1", 3600)
-    await pipe.execute()
-```
+### Cached data is stale after a mutation
 
-## Performance Optimization
+The mutation route needs the **same `(key_prefix, resource_id_name)`** as the GET route. If your `PATCH /widgets/{widget_id}` uses `key_prefix="widget"` and your `GET /widgets/{widget_id}` uses `key_prefix="widget_cache"`, they won't talk to each other.
 
-### Connection Pooling
+### Cache returns the wrong user's data
 
-Connection pooling prevents the overhead of creating new Redis connections for each request:
+You're keying by resource ID without including the user. See "Don't Cache Personalized Responses Globally" above.
 
-```python
-# Benefits of connection pooling:
-# - Reuses existing connections
-# - Handles connection failures gracefully
-# - Provides connection health checks
-# - Supports concurrent operations
+## Key Files
 
-# Pool configuration
-redis.ConnectionPool.from_url(
-    settings.REDIS_CACHE_URL,
-    max_connections=20,        # Adjust based on expected load
-    retry_on_timeout=True,     # Handle network issues
-    socket_keepalive=True,     # Keep connections alive
-    socket_keepalive_options={}
-)
-```
+| Component | Location |
+|-----------|----------|
+| Decorator | `backend/src/infrastructure/cache/decorator.py` |
+| Provider API | `backend/src/infrastructure/cache/provider.py` |
+| Redis backend | `backend/src/infrastructure/cache/backends/redis.py` |
+| Memcached backend | `backend/src/infrastructure/cache/backends/memcached.py` |
+| Settings | `backend/src/infrastructure/config/settings.py` (`CacheSettings`) |
 
-### Cache Key Generation
+## Next Steps
 
-The cache decorator automatically generates keys using this pattern:
-
-```python
-# Decorator generates: "{formatted_key_prefix}:{resource_id}"
-@cache(key_prefix="post_cache", resource_id_name="post_id")
-# Generates: "post_cache:123"
-
-@cache(key_prefix="{username}_posts:page_{page}")
-# Generates: "johndoe_posts:page_1:456" (where 456 is the resource_id)
-
-# The system handles key formatting automatically - you just provide the prefix template
-```
-
-**What you control:**
-- `key_prefix` template with placeholders like `{username}`, `{page}`
-- `resource_id_name` to specify which parameter to use as the ID
-- The decorator handles the rest
-
-**Generated key examples from the boilerplate:**
-```python
-# From posts.py
-"{username}_posts:page_{page}:items_per_page_{items_per_page}" → "john_posts:page_1:items_per_page_10:789"
-"{username}_post_cache" → "john_post_cache:123"
-```
-
-### Expiration Strategies
-
-Choose appropriate expiration times based on data characteristics:
-
-```python
-# Static reference data (rarely changes)
-@cache(key_prefix="countries", expiration=86400)  # 24 hours
-
-# User-generated content (changes moderately)
-@cache(key_prefix="user_posts", expiration=1800)  # 30 minutes
-
-# Real-time data (changes frequently)
-@cache(key_prefix="live_stats", expiration=60)    # 1 minute
-
-# Search results (can be stale)
-@cache(key_prefix="search", expiration=3600)      # 1 hour
-```
-
-This comprehensive Redis caching system provides high-performance data access while maintaining data consistency through intelligent invalidation strategies. 
+- **[Client Cache](client-cache.md)** — `Cache-Control` headers for browser caching
+- **[Cache Strategies](cache-strategies.md)** — Patterns for keys, related-key invalidation, cache-aside flows
+- **[Environment Variables](../configuration/environment-variables.md#cache)** — Full settings reference

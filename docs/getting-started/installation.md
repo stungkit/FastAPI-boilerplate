@@ -1,416 +1,301 @@
 # Installation Guide
 
-This guide covers different ways to install and set up the FastAPI Boilerplate depending on your needs and environment.
+This guide covers different ways to install the FastAPI Boilerplate depending on your needs.
 
 ## System Requirements
 
-Before you begin, ensure your system meets these requirements:
-
 - **Python**: 3.11 or higher
-- **Operating System**: Linux, macOS, or Windows (with WSL2 recommended)
-- **Memory**: Minimum 4GB RAM (8GB recommended)
-- **Disk Space**: At least 2GB free space
+- **Operating System**: Linux, macOS, or Windows (WSL2 recommended)
+- **Memory**: 4GB RAM minimum (8GB recommended)
+- **Disk Space**: ~2GB free
 
 ## Method 1: Docker Compose (Recommended)
 
-Docker Compose is the easiest way to get started. It handles all dependencies and services automatically.
+Docker Compose handles every service for you (Postgres + Redis + the app).
 
 ### Prerequisites
 
-Install these tools on your system:
+- [Docker](https://docs.docker.com/get-docker/) (20.10+)
+- [Docker Compose](https://docs.docker.com/compose/install/) (v2+)
 
-- [Docker](https://docs.docker.com/get-docker/) (version 20.10+)
-- [Docker Compose](https://docs.docker.com/compose/install/) (version 1.29+)
-
-### Installation Steps
-
-1. **Get the template**:
-
-   ```bash
-   git clone https://github.com/benavlabs/fastapi-boilerplate
-   cd fastapi-boilerplate
-   ```
-
-1. **Quick setup** (recommended):
-
-   ```bash
-   # Interactive setup - choose your deployment type
-   ./setup.py
-   
-   # Or specify directly: ./setup.py local, ./setup.py staging, ./setup.py production
-   ```
-
-   This automatically copies the correct `Dockerfile`, `docker-compose.yml`, and `.env` files for your chosen deployment scenario.
-
-1. **Start services**:
-
-   ```bash
-   docker compose up -d
-   ```
-
-#### Manual Setup Alternative
-
-If you prefer to set up manually:
-
-```bash
-# Copy configuration files for local development
-cp scripts/local_with_uvicorn/Dockerfile Dockerfile
-cp scripts/local_with_uvicorn/docker-compose.yml docker-compose.yml  
-cp scripts/local_with_uvicorn/.env.example src/.env
-# Edit src/.env with your configuration if needed
-```
-
-1. **Verify installation**:
-
-   ```bash
-   curl http://localhost:8000/docs
-   ```
-
-### What Gets Installed
-
-Docker Compose sets up these services:
-
-- **Web server** (FastAPI + Uvicorn) on port 8000
-- **PostgreSQL** database on port 5432 (internal)
-- **Redis** server on port 6379 (internal)
-- **ARQ Worker** for background tasks
-- **NGINX** (optional, for production)
-
-## Method 2: Manual Installation
-
-For more control or development purposes, you can install everything manually.
-
-### Prerequisites
-
-1. **Install Python 3.11+**:
-
-   ```bash
-   # On Ubuntu/Debian
-   sudo apt update
-   sudo apt install python3.11 python3.11-pip
-
-   # On macOS (with Homebrew)
-   brew install python@3.11
-
-   # On Windows
-   # Download from python.org
-   ```
-
-1. **Install uv** (Python package manager):
-
-   ```bash
-   pip install uv
-   ```
-
-1. **Install PostgreSQL**:
-
-   ```bash
-   # On Ubuntu/Debian
-   sudo apt install postgresql postgresql-contrib
-
-   # On macOS
-   brew install postgresql
-
-   # On Windows
-   # Download from postgresql.org
-   ```
-
-1. **Install Redis**:
-
-   ```bash
-   # On Ubuntu/Debian
-   sudo apt install redis-server
-
-   # On macOS
-   brew install redis
-
-   # On Windows
-   # Download from redis.io
-   ```
-
-### Installation Steps
+### Steps
 
 1. **Clone the repository**:
 
-   ```bash
-   git clone https://github.com/benavlabs/fastapi-boilerplate
-   cd fastapi-boilerplate
-   ```
+    ```bash
+    git clone https://github.com/benavlabs/fastapi-boilerplate
+    cd fastapi-boilerplate/backend
+    ```
 
-1. **Install Python dependencies**:
+2. **Set up the environment file**:
 
-   ```bash
-   uv sync
-   ```
+    ```bash
+    cp .env.example .env
+    # Edit .env: set SECRET_KEY, change default DB password, etc.
+    ```
 
-1. **Set up environment variables**:
+3. **Bring up the stack**:
 
-   ```bash
-   cp src/.env.example src/.env
-   # Edit src/.env with your local database/Redis settings
-   ```
+    ```bash
+    docker compose up
+    ```
 
-1. **Set up PostgreSQL**:
+4. **Verify it's running**:
 
-   ```bash
-   # Create database and user
-   sudo -u postgres psql
-   CREATE DATABASE myapp;
-   CREATE USER myuser WITH PASSWORD 'mypassword';
-   GRANT ALL PRIVILEGES ON DATABASE myapp TO myuser;
-   \q
-   ```
+    ```bash
+    curl http://localhost:8000/health
+    ```
 
-1. **Run database migrations**:
+### What Gets Installed
 
-   ```bash
-   cd src
-   uv run alembic upgrade head
-   ```
+- **App** (FastAPI + Uvicorn) on port 8000
+- **PostgreSQL** on port 5432
+- **Redis** on port 6379
 
-1. **Create admin user**:
+## Method 2: Manual Installation (Local with uv)
 
-   ```bash
-   uv run python -m src.scripts.create_first_superuser
-   ```
+For development on your host machine. You provide PostgreSQL and Redis yourself.
 
-1. **Start the application**:
+### Prerequisites
 
-   ```bash
-   uv run uvicorn src.app.main:app --reload --host 0.0.0.0 --port 8000
-   ```
+1. **Python 3.11+**:
 
-1. **Start the worker** (in another terminal):
+    ```bash
+    # Ubuntu/Debian
+    sudo apt update && sudo apt install python3.11
 
-   ```bash
-   uv run arq src.app.core.worker.settings.WorkerSettings
-   ```
+    # macOS
+    brew install python@3.11
+
+    # Windows: download from python.org
+    ```
+
+2. **uv** (fast Python package manager):
+
+    ```bash
+    # macOS / Linux
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+
+    # or via pip
+    pip install uv
+    ```
+
+3. **PostgreSQL**:
+
+    ```bash
+    # Ubuntu/Debian
+    sudo apt install postgresql postgresql-contrib
+
+    # macOS
+    brew install postgresql
+    ```
+
+4. **Redis**:
+
+    ```bash
+    # Ubuntu/Debian
+    sudo apt install redis-server
+
+    # macOS
+    brew install redis
+    ```
+
+### Steps
+
+1. **Clone the repository**:
+
+    ```bash
+    git clone https://github.com/benavlabs/fastapi-boilerplate
+    cd fastapi-boilerplate
+    ```
+
+    The repo is a [uv workspace](https://docs.astral.sh/uv/concepts/projects/workspaces/) — the deployable application lives in `backend/` and the developer CLI (`bp`) lives in `cli/`. Both share a single virtual environment at the repo root.
+
+2. **Install Python dependencies**:
+
+    ```bash
+    uv sync --all-packages --all-extras
+    ```
+
+    This syncs the whole workspace — backend, CLI, and dev tools — into one `.venv/` at the repo root. From here on, `uv run <cmd>` works from any subdirectory.
+
+3. **Set up environment variables**:
+
+    ```bash
+    cp backend/.env.example backend/.env
+    # Edit backend/.env: point POSTGRES_SERVER and CACHE_REDIS_HOST at localhost,
+    # set a strong SECRET_KEY (or run `uv run bp env gen-secret`), etc.
+    ```
+
+    The CLI ships a few helpers for this step — see [CLI → Commands](../cli/commands.md):
+
+    ```bash
+    uv run bp env gen-secret      # print a fresh SECRET_KEY
+    uv run bp env validate        # audit the .env against the production validator
+    ```
+
+4. **Set up PostgreSQL** (if not already configured):
+
+    ```bash
+    sudo -u postgres psql
+    CREATE DATABASE myapp;
+    CREATE USER myuser WITH PASSWORD 'mypassword';
+    GRANT ALL PRIVILEGES ON DATABASE myapp TO myuser;
+    \q
+    ```
+
+5. **Run database migrations** (from `backend/` — alembic looks for `alembic.ini` in cwd):
+
+    ```bash
+    cd backend
+    uv run alembic upgrade head
+    ```
+
+6. **Create the initial admin user and tier**:
+
+    ```bash
+    uv run python -m scripts.setup_initial_data
+    ```
+
+7. **Start the app**:
+
+    ```bash
+    uv run fastapi dev src/interfaces/main.py
+    ```
+
+8. **(Optional) Start a Taskiq worker** (in a second terminal):
+
+    ```bash
+    uv run taskiq worker infrastructure.taskiq.worker:default_broker
+    ```
 
 ## Method 3: Development Setup
 
-For contributors and advanced users who want to modify the boilerplate.
+For contributors and anyone modifying the boilerplate itself.
 
-### Additional Prerequisites
-
-- **Git** for version control
-
-### Installation Steps
+### Steps
 
 1. **Fork and clone**:
 
-   ```bash
-   # Fork the repository on GitHub first
-   git clone https://github.com/yourusername/fastapi-boilerplate
-   cd fastapi-boilerplate
-   ```
+    ```bash
+    # Fork on GitHub first
+    git clone https://github.com/yourusername/fastapi-boilerplate
+    cd fastapi-boilerplate
+    ```
 
-1. **Install development dependencies**:
+2. **Install dev dependencies**:
 
-   ```bash
-   uv sync --group dev
-   ```
+    ```bash
+    uv sync --all-packages --all-extras
+    ```
 
-1. **Set up pre-commit hooks**:
+3. **Set up pre-commit hooks** (from the repo root):
 
-   ```bash
-   uv run pre-commit install
-   ```
+    ```bash
+    uv run --project backend pre-commit install
+    ```
 
-1. **Set up development environment**:
+4. **Set up the environment**:
 
-   ```bash
-   cp src/.env.example src/.env
-   # Configure for development
-   ```
+    ```bash
+    cp backend/.env.example backend/.env
+    ```
 
-1. **Run tests to verify setup**:
+5. **Run the test suite to verify your setup**:
 
-   ```bash
-   uv run pytest
-   ```
-
-## Docker Services Breakdown
-
-Understanding what each Docker service does:
-
-### Web Service
-
-```yaml
-web:
-  build: .
-  ports:
-    - "8000:8000"
-  depends_on:
-    - db
-    - redis
-```
-
-- Runs the FastAPI application
-- Handles HTTP requests
-- Auto-reloads on code changes (development)
-
-### Database Service
-
-```yaml
-db:
-  image: postgres:13
-  environment:
-    POSTGRES_DB: myapp
-    POSTGRES_USER: postgres
-    POSTGRES_PASSWORD: changethis
-```
-
-- PostgreSQL database server
-- Persistent data storage
-- Automatic initialization
-
-### Redis Service
-
-```yaml
-redis:
-  image: redis:alpine
-  command: redis-server --appendonly yes
-```
-
-- In-memory data store
-- Used for caching and job queues
-- Persistent storage with AOF
-
-### Worker Service
-
-```yaml
-worker:
-  build: .
-  command: arq src.app.core.worker.settings.WorkerSettings
-  depends_on:
-    - redis
-```
-
-- Background task processor
-- Handles async jobs
-- Scales independently
+    ```bash
+    uv run pytest
+    ```
 
 ## Configuration
 
 ### Environment Variables
 
-The application uses environment variables for configuration. Key variables:
+The app reads its configuration from `backend/.env` (see `backend/.env.example` for the full reference). Common variables:
 
 ```env
+# Environment
+ENVIRONMENT=development
+
 # Database
 POSTGRES_USER=postgres
-POSTGRES_PASSWORD=changethis
-POSTGRES_SERVER=localhost  # or "db" for Docker
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=postgres
+POSTGRES_SERVER=db        # use "localhost" without Docker
 POSTGRES_PORT=5432
-POSTGRES_DB=myapp
 
-# Redis
-REDIS_CACHE_HOST=localhost  # or "redis" for Docker
-REDIS_CACHE_PORT=6379
+# Cache (Redis)
+CACHE_BACKEND=redis
+CACHE_REDIS_HOST=redis    # use "localhost" without Docker
+CACHE_REDIS_PORT=6379
 
 # Security
-SECRET_KEY=your-secret-key-here
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
+SECRET_KEY=insecure-change-this-in-production
+
+# Initial admin
+ADMIN_NAME=Admin User
+ADMIN_EMAIL=admin@example.com
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your-secure-password
 ```
 
-### Database Connection
-
-For manual installation, update your database settings:
-
-```env
-# Local PostgreSQL
-POSTGRES_SERVER=localhost
-POSTGRES_PORT=5432
-
-# Docker PostgreSQL
-POSTGRES_SERVER=db
-POSTGRES_PORT=5432
-```
+See [Environment Variables](../user-guide/configuration/environment-variables.md) for the complete reference.
 
 ## Verification
 
-After installation, verify everything works:
+After installing, verify everything works:
 
-1. **API Documentation**: http://localhost:8000/docs
-1. **Health Check**: http://localhost:8000/api/v1/health
-1. **Ready Check**: http://localhost:8000/api/v1/ready
-1. **Database Connection**: Check logs for successful connection
-1. **Redis Connection**: Test caching functionality
-1. **Background Tasks**: Submit a test job
+1. **API Docs**: <http://localhost:8000/docs>
+2. **Health Check**: `curl http://localhost:8000/health`
+3. **Admin Panel**: <http://localhost:8000/admin>
+4. **Database**: check the app log for "Database connected" / no errors at startup
 
 ## Troubleshooting
 
-### Common Issues
-
-**Port Already in Use**:
+### Port Already in Use
 
 ```bash
-# Check what's using port 8000
+# Find what's on port 8000
 lsof -i :8000
-
-# Kill the process
 kill -9 <PID>
 ```
 
-**Database Connection Error**:
+### Database Connection Error
 
 ```bash
-# Check PostgreSQL status
+# Linux
 sudo systemctl status postgresql
-
-# Restart PostgreSQL
 sudo systemctl restart postgresql
+
+# macOS (Homebrew)
+brew services restart postgresql
 ```
 
-**Redis Connection Error**:
+### Redis Connection Error
 
 ```bash
-# Check Redis status
-redis-cli ping
-
-# Start Redis
+redis-cli ping  # should print PONG
+# If not, start it:
 redis-server
 ```
 
-**Permission Errors**:
+### Docker — Clean Reset
 
 ```bash
-# Fix Docker permissions
-sudo usermod -aG docker $USER
-# Log out and back in
-```
-
-### Docker Issues
-
-**Clean Reset**:
-
-```bash
-# Stop all containers
-docker compose down
-
-# Remove volumes (⚠️ deletes data)
-docker compose down -v
-
-# Rebuild images
+cd backend
+docker compose down       # stop containers
+docker compose down -v    # also delete volumes (⚠️ wipes data)
 docker compose build --no-cache
-
-# Start fresh
 docker compose up
 ```
 
 ## Next Steps
 
-After successful installation:
-
 1. **[Configuration Guide](configuration.md)** - Set up your environment
-1. **[First Run](first-run.md)** - Test your installation
-1. **[Project Structure](../user-guide/project-structure.md)** - Understand the codebase
+2. **[First Run](first-run.md)** - Test your installation
+3. **[Project Structure](../user-guide/project-structure.md)** - Understand the codebase
 
 ## Need Help?
 
-If you encounter issues:
-
-- Check the [GitHub Issues](https://github.com/benavlabs/fastapi-boilerplate/issues) for common problems
-- Search [existing issues](https://github.com/benavlabs/fastapi-boilerplate/issues)
-- Create a [new issue](https://github.com/benavlabs/fastapi-boilerplate/issues/new) with details
+- Check the [GitHub Issues](https://github.com/benavlabs/fastapi-boilerplate/issues) for known problems
+- Open a [new issue](https://github.com/benavlabs/fastapi-boilerplate/issues/new) with details

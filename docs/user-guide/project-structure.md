@@ -1,296 +1,264 @@
 # Project Structure
 
-Understanding the project structure is essential for navigating the FastAPI Boilerplate effectively. This guide explains the organization of the codebase, the purpose of each directory, and how components interact with each other.
+The codebase follows a three-layer architecture (**interfaces / infrastructure / modules**) with **vertical-slice modules** — each feature owns its models, schemas, CRUD, service, and routes in one folder. This guide explains how everything is organized and where to put new code.
 
-## Overview
-
-The FastAPI Boilerplate follows a clean, modular architecture that separates concerns and promotes maintainability. The structure is designed to scale from simple APIs to complex applications while maintaining code organization and clarity.
-
-## Root Directory Structure
+## Repository Root
 
 ```text
-FastAPI-boilerplate/
-├── Dockerfile                 # Container configuration
-├── docker-compose.yml         # Multi-service orchestration
-├── pyproject.toml            # Project configuration and dependencies
-├── uv.lock                   # Dependency lock file
-├── README.md                 # Project documentation
-├── LICENSE.md                # License information
-├── tests/                    # Test suite
-├── docs/                     # Documentation
-└── src/                      # Source code
+fastapi-boilerplate/
+├── backend/                  # Python project root (see below)
+├── docs/                     # zensical documentation
+├── .github/                  # CI workflows
+├── README.md
+└── LICENSE.md
+```
+
+The Python project lives entirely under `backend/`. If you ever add a frontend, it would sit alongside as `frontend/`.
+
+## Backend Layout
+
+```text
+backend/
+├── pyproject.toml            # Dependencies and tooling config
+├── uv.lock                   # Locked dependency versions
+├── Dockerfile                # Container image for the app
+├── alembic.ini               # Alembic migration config
+├── .env.example              # Reference for environment variables
+├── migrations/               # Alembic migrations
+│   ├── env.py
+│   ├── script.py.mako
+│   └── versions/
+├── scripts/                  # One-off setup scripts
+│   ├── create_first_superuser.py
+│   ├── create_first_tier.py
+│   ├── create_tables.py
+│   └── setup_initial_data.py
+├── src/                      # Application source (the three layers below)
+└── tests/                    # Test suite (unit + integration)
 ```
 
 ### Configuration Files
 
 | File | Purpose |
 |------|---------|
-| `Dockerfile` | Defines the container image for the application |
-| `docker-compose.yml` | Orchestrates multiple services (API, database, Redis, worker) |
-| `pyproject.toml` | Modern Python project configuration with dependencies and metadata |
-| `uv.lock` | Locks exact dependency versions for reproducible builds |
+| `pyproject.toml` | Project metadata, dependencies (`[project]`), tooling config (ruff, mypy, pytest) |
+| `uv.lock` | Locks exact dependency versions for reproducible installs |
+| `Dockerfile` | Multi-stage build: requirements export → base → dev/prod/migrate stages |
+| `alembic.ini` | Alembic settings (script location, logging) |
+| `.env.example` | Documented reference of every environment variable |
 
-## Source Code Structure
-
-The `src/` directory contains all application code:
+## The Three Layers (`src/`)
 
 ```text
 src/
-├── app/                      # Main application package
-│   ├── main.py              # Application entry point
-│   ├── api/                 # API layer
-│   ├── core/                # Core utilities and configurations
-│   ├── crud/                # Database operations
-│   ├── models/              # SQLAlchemy models
-│   ├── schemas/             # Pydantic schemas
-│   ├── middleware/          # Custom middleware
-│   └── logs/                # Application logs
-├── migrations/              # Database migrations
-└── scripts/                 # Utility scripts
+├── interfaces/               # HOW the world talks to the app (HTTP, admin UI)
+├── infrastructure/           # WHAT the app uses (DB, cache, auth, taskiq, config)
+└── modules/                  # WHAT the app IS (vertical-slice feature modules)
 ```
 
-## Core Application (`src/app/`)
+The flow is **interfaces → modules → infrastructure**:
 
-### Entry Point
-- **`main.py`** - FastAPI application instance and configuration
+- `interfaces` mounts routers, middleware, and the admin UI.
+- `modules` express domain features. Each one is self-contained.
+- `infrastructure` provides the cross-cutting plumbing every layer above can reach for.
 
-### API Layer (`api/`)
+Modules don't import each other directly except for the shared `common` module. Interfaces don't contain business logic. Infrastructure doesn't know about specific features.
+
+### `src/interfaces/`
+
 ```text
-api/
-├── dependencies.py          # Shared dependencies
-└── v1/                     # API version 1
-    ├── login.py            # Authentication endpoints
-    ├── logout.py           # Logout functionality
-    ├── users.py            # User management
-    ├── posts.py            # Post operations
-    ├── tasks.py            # Background task endpoints
-    ├── tiers.py            # User tier management
-    └── rate_limits.py      # Rate limiting endpoints
+interfaces/
+├── main.py                   # FastAPI app instance + lifespan + middleware setup
+├── api/
+│   ├── __init__.py           # Mounts /api router
+│   └── v1/
+│       └── __init__.py       # Mounts /v1 + each module's router
+└── admin/
+    ├── initialize.py         # SQLAdmin setup (mounted at /admin)
+    ├── auth.py               # Admin auth backend
+    ├── mixins.py
+    └── views/                # SQLAdmin model views (Tier, User, etc.)
 ```
 
-**Purpose**: Contains all API endpoints organized by functionality and version.
+`main.py` is the entry point — `uv run fastapi dev src/interfaces/main.py` starts here. The `v1/__init__.py` aggregator imports each module's `routes` and includes them under the right prefix.
 
-### Core System (`core/`)
+### `src/infrastructure/`
+
 ```text
-core/
-├── config.py               # Application settings
-├── logger.py               # Logging configuration
-├── schemas.py              # Core Pydantic schemas
-├── security.py             # Security utilities
-├── setup.py                # Application factory
-├── db/                     # Database core
-├── exceptions/             # Custom exceptions
-├── utils/                  # Utility functions
-└── worker/                 # Background worker
+infrastructure/
+├── app_factory.py            # Builds the FastAPI app (CORS, GZip, middleware, lifespan)
+├── middleware.py             # ClientCache, SecurityHeaders, etc.
+├── config/                   # Settings + Pydantic-driven env loading
+│   ├── settings.py
+│   └── enums.py
+├── database/                 # SQLAlchemy engine, session, base model
+├── auth/                     # Session auth, OAuth, HTTP exceptions, route handlers
+│   ├── session/              # Server-side sessions (memory/redis/memcached backends)
+│   ├── oauth/                # OAuth provider abstractions (Google, GitHub stub)
+│   ├── routes.py             # /auth/login, /logout, /oauth/google, /check-auth
+│   ├── http_exceptions.py
+│   └── utils.py
+├── cache/                    # Redis/Memcached cache + decorator
+│   └── backends/
+├── rate_limit/               # Rate limiter middleware + Redis/Memcached backends
+│   └── backends/
+├── taskiq/                   # Async task queue (broker, worker entry point, registry)
+├── security/                 # Production security validator
+└── logging/                  # Centralized logging configuration
 ```
 
-**Purpose**: Houses core functionality, configuration, and shared utilities.
+`infrastructure/auth/routes.py` is intentionally placed here (instead of in a `modules/auth/` folder) because authentication is structural — every feature relies on it.
 
-#### Database Core (`core/db/`)
+### `src/modules/` — Vertical-Slice Features
+
 ```text
-db/
-├── database.py             # Database connection and session management
-├── models.py               # Base models and mixins
-├── crud_token_blacklist.py # Token blacklist operations
-└── token_blacklist.py      # Token blacklist model
+modules/
+├── common/                   # Cross-module shared schemas, exceptions, utils
+│   ├── constants.py
+│   ├── exceptions.py
+│   ├── schemas.py
+│   └── utils/
+├── user/
+│   ├── models.py             # SQLAlchemy User model
+│   ├── schemas.py            # Pydantic UserCreate, UserRead, UserUpdate, etc.
+│   ├── crud.py               # FastCRUD wrapper (crud_users)
+│   ├── service.py            # Business logic (UserService)
+│   ├── routes.py             # APIRouter with /users endpoints
+│   └── enums.py              # OAuthProvider, etc.
+├── tier/                     # Subscription tiers (model + simple CRUD)
+├── rate_limit/               # Per-tier rate limit definitions
+└── api_keys/                 # API keys, key usage, key permissions
 ```
 
-#### Exceptions (`core/exceptions/`)
-```text
-exceptions/
-├── cache_exceptions.py     # Cache-related exceptions
-└── http_exceptions.py      # HTTP exceptions
-```
+Each module is **self-contained**: drop it in, drop it out, with minimal blast radius. The aggregator at `interfaces/api/v1/__init__.py` is the only place that knows about every module's router.
 
-#### Utilities (`core/utils/`)
-```text
-utils/
-├── cache.py                # Caching utilities
-├── queue.py                # Task queue management
-└── rate_limit.py           # Rate limiting utilities
-```
+### Common Module Files
 
-#### Worker (`core/worker/`)
-```text
-worker/
-├── settings.py             # Worker configuration
-└── functions.py            # Background task definitions
-```
+| File | Purpose |
+|------|---------|
+| `models.py` | SQLAlchemy ORM models (table schema) |
+| `schemas.py` | Pydantic request/response models |
+| `crud.py` | FastCRUD instances for the model |
+| `service.py` | Business logic — orchestrates CRUD calls, applies rules |
+| `routes.py` | `APIRouter` with the module's endpoints |
+| `enums.py` | StrEnum types if the module needs them (optional) |
 
-### Data Layer
-
-#### Models (`models/`)
-```text
-models/
-├── user.py                 # User model
-├── post.py                 # Post model
-├── tier.py                 # User tier model
-└── rate_limit.py           # Rate limit model
-```
-
-**Purpose**: SQLAlchemy ORM models defining database schema.
-
-#### Schemas (`schemas/`)
-```text
-schemas/
-├── user.py                 # User validation schemas
-├── post.py                 # Post validation schemas
-├── tier.py                 # Tier validation schemas
-├── rate_limit.py           # Rate limit schemas
-└── job.py                  # Background job schemas
-```
-
-**Purpose**: Pydantic schemas for request/response validation and serialization.
-
-#### CRUD Operations (`crud/`)
-```text
-crud/
-├── crud_base.py            # Base CRUD class
-├── crud_users.py           # User operations
-├── crud_posts.py           # Post operations
-├── crud_tier.py            # Tier operations
-├── crud_rate_limit.py      # Rate limit operations
-└── helper.py               # CRUD helper functions
-```
-
-**Purpose**: Database operations using FastCRUD for consistent data access patterns.
-
-### Additional Components
-
-#### Middleware (`middleware/`)
-```text
-middleware/
-└── client_cache_middleware.py  # Client-side caching middleware
-```
-
-#### Logs (`logs/`)
-```text
-logs/
-└── app.log                 # Application log file
-```
-
-## Database Migrations (`src/migrations/`)
+## Migrations (`backend/migrations/`)
 
 ```text
 migrations/
-├── README                  # Migration instructions
-├── env.py                  # Alembic environment configuration
-├── script.py.mako          # Migration template
-└── versions/               # Individual migration files
+├── env.py                    # Alembic environment (loads all models)
+├── script.py.mako            # Template for new migrations
+└── versions/                 # One file per migration revision
 ```
 
-**Purpose**: Alembic database migrations for schema version control.
+Run from `backend/`:
 
-## Utility Scripts (`src/scripts/`)
+```bash
+uv run alembic revision --autogenerate -m "add foo"
+uv run alembic upgrade head
+```
+
+## Scripts (`backend/scripts/`)
 
 ```text
 scripts/
-├── create_first_superuser.py  # Create initial admin user
-└── create_first_tier.py       # Create initial user tier
+├── setup_initial_data.py     # All-in-one: tables + tier + admin
+├── create_first_superuser.py # Just the admin user
+├── create_first_tier.py      # Just the default tier
+└── create_tables.py          # Just the database tables
 ```
 
-**Purpose**: Initialization and maintenance scripts.
+The most common entry point is `setup_initial_data` which calls all three.
 
-## Testing Structure (`tests/`)
+```bash
+uv run python -m scripts.setup_initial_data
+```
+
+## Tests (`backend/tests/`)
 
 ```text
 tests/
-├── conftest.py             # Pytest configuration and fixtures
-├── test_user_unit.py       # User-related unit tests
-└── helpers/                # Test utilities
-    ├── generators.py       # Test data generators
-    └── mocks.py            # Mock objects and functions
+├── conftest.py               # Pytest fixtures (Postgres testcontainer, db session, client, mocks)
+├── unit/                     # Unit tests (no external deps)
+│   ├── infrastructure/
+│   └── modules/
+└── integration/              # Integration tests (real Postgres via testcontainers)
+```
+
+Run from `backend/`:
+
+```bash
+uv run pytest tests/unit       # fast, no Docker
+uv run pytest tests/integration  # spins up Postgres in Docker via testcontainers
+uv run pytest                  # everything
 ```
 
 ## Architectural Patterns
 
-### Layered Architecture
+### Three-Layer Architecture
 
-The boilerplate implements a clean layered architecture:
+1. **Interfaces** (`interfaces/`) - HTTP routes, admin UI, the FastAPI app instance
+2. **Modules** (`modules/`) - Domain features as vertical slices
+3. **Infrastructure** (`infrastructure/`) - Cross-cutting plumbing (DB, cache, auth, queue, config, logging)
 
-1. **API Layer** (`api/`) - Handles HTTP requests and responses
-2. **Business Logic** (`crud/`) - Implements business rules and data operations
-3. **Data Access** (`models/`) - Defines data structure and database interaction
-4. **Core Services** (`core/`) - Provides shared functionality and configuration
+Dependencies flow downward: interfaces depend on modules and infrastructure; modules depend on infrastructure (and `modules/common`). Infrastructure has no upward dependencies.
+
+### Vertical Slices
+
+Each `modules/<feature>/` folder owns the entire stack for that feature. Adding a new feature means adding **one** new folder, not editing five separate top-level directories.
 
 ### Dependency Injection
 
-FastAPI's dependency injection system is used throughout:
+FastAPI's `Depends` is used throughout:
 
-- **Database Sessions** - Injected into endpoints via `async_get_db`
-- **Authentication** - User context provided by `get_current_user`
-- **Rate Limiting** - Applied via `rate_limiter_dependency`
-- **Caching** - Managed through decorators and middleware
+- **Database session** — `Depends(async_session)` from `infrastructure.database.session`
+- **Current user** — `Depends(get_current_user)` from `infrastructure.auth.session.dependencies`
+- **Superuser only** — `Depends(get_current_superuser)`
+- **Service instances** — Each module's `routes.py` defines its own `get_<feature>_service()` factory
 
-### Configuration Management
+### Configuration
 
-All configuration is centralized in `core/config.py`:
+All configuration lives in `infrastructure/config/settings.py`, loaded from `.env`:
 
-- **Environment Variables** - Loaded from `.env` file
-- **Settings Classes** - Organized by functionality (database, security, etc.)
-- **Type Safety** - Using Pydantic for validation
+- Settings classes grouped by concern (`DatabaseSettings`, `CacheSettings`, `AuthSettings`, etc.)
+- A single `Settings` class composes them
+- `get_settings()` returns a cached singleton
 
 ### Error Handling
 
-Centralized exception handling:
+- Domain exceptions in `modules/common/exceptions.py` (e.g. `ResourceNotFoundError`, `PermissionDeniedError`)
+- HTTP-shaped exceptions in `infrastructure/auth/http_exceptions.py`
+- Routes catch domain exceptions and translate them via `modules/common/utils/error_handler.handle_exception`
 
-- **Custom Exceptions** - Defined in `core/exceptions/`
-- **HTTP Status Codes** - Consistent error responses
-- **Logging** - Automatic error logging and tracking
+## Adding a New Feature
 
-## Design Principles
+The recommended flow:
 
-### Single Responsibility
+1. **Create the module folder**: `mkdir backend/src/modules/widgets`
+2. **Define the model**: `backend/src/modules/widgets/models.py`
+3. **Add schemas**: `backend/src/modules/widgets/schemas.py`
+4. **Wrap with FastCRUD**: `backend/src/modules/widgets/crud.py`
+5. **Write the service**: `backend/src/modules/widgets/service.py`
+6. **Expose routes**: `backend/src/modules/widgets/routes.py`
+7. **Register the router** in `backend/src/interfaces/api/v1/__init__.py`
+8. **Generate a migration**: `uv run alembic revision --autogenerate -m "add widgets"`
+9. **Apply**: `uv run alembic upgrade head`
 
-Each module has a clear, single purpose:
+See [Development Guide](development.md) for a full walkthrough.
 
-- Models define data structure
-- Schemas handle validation
-- CRUD manages data operations
-- API endpoints handle requests
-
-### Separation of Concerns
-
-- Business logic separated from presentation
-- Database operations isolated from API logic
-- Configuration centralized and environment-aware
-
-### Modularity
-
-- Features can be added/removed independently
-- Services can be disabled via configuration
-- Clear interfaces between components
-
-### Scalability
-
-- Async/await throughout the application
-- Connection pooling for database access
-- Caching and background task support
-- Horizontal scaling ready
-
-## Navigation Tips
-
-### Finding Code
-
-- **Models** → `src/app/models/`
-- **API Endpoints** → `src/app/api/v1/`
-- **Database Operations** → `src/app/crud/`
-- **Configuration** → `src/app/core/config.py`
-- **Business Logic** → Distributed across CRUD and API layers
-
-### Adding New Features
-
-1. **Model** → Define in `models/`
-2. **Schema** → Create in `schemas/`
-3. **CRUD** → Implement in `crud/`
-4. **API** → Add endpoints in `api/v1/`
-5. **Migration** → Generate with Alembic
-
-### Understanding Data Flow
+## Data Flow
 
 ```text
-Request → API Endpoint → Dependencies → CRUD → Model → Database
-Response ← API Response ← Schema ← CRUD ← Query Result ← Database
+HTTP Request
+    → interfaces/api/v1/__init__.py
+    → modules/<feature>/routes.py
+    → modules/<feature>/service.py
+    → modules/<feature>/crud.py (FastCRUD)
+    → infrastructure/database/session.py
+    → PostgreSQL
+
+HTTP Response ← Pydantic schema ← service ← CRUD result ← DB query
 ```
 
-This structure provides a solid foundation for building scalable, maintainable APIs while keeping the codebase organized and easy to navigate. 
+This layering keeps HTTP concerns out of business logic, and business logic out of data access — making the codebase straightforward to navigate, test, and extend.

@@ -1,327 +1,441 @@
 # API Endpoints
 
-This guide shows you how to create API endpoints using the boilerplate's established patterns. You'll learn the common patterns you need for building CRUD APIs.
+This guide shows the patterns the boilerplate uses for endpoints, so adding new ones stays consistent with the existing modules.
 
 ## Quick Start
 
-Here's how to create a typical endpoint using the boilerplate's patterns:
+A typical endpoint lives in `modules/<feature>/routes.py` and delegates work to a service:
 
 ```python
-from fastapi import APIRouter, Depends, HTTPException
-from typing import Annotated
+# backend/src/modules/widgets/routes.py
+from typing import Annotated, Any
 
-from app.core.db.database import async_get_db
-from app.crud.crud_users import crud_users
-from app.schemas.user import UserRead, UserCreate
-from app.api.dependencies import get_current_user
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
-router = APIRouter(prefix="/users", tags=["users"])
+from ...infrastructure.auth.http_exceptions import HTTPException
+from ...infrastructure.auth.session.dependencies import get_current_user
+from ...infrastructure.database.session import async_session
+from ..common.utils.error_handler import handle_exception
+from .schemas import WidgetCreate, WidgetRead
+from .service import WidgetService
 
-@router.get("/{user_id}", response_model=UserRead)
-async def get_user(
-    user_id: int,
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    """Get a user by ID."""
-    user = await crud_users.get(db=db, id=user_id, schema_to_select=UserRead)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+router = APIRouter(tags=["Widgets"])
+
+
+def get_widget_service() -> WidgetService:
+    """Per-module service factory used by Depends()."""
+    return WidgetService()
+
+
+@router.get("/{widget_id}", response_model=WidgetRead)
+async def get_widget(
+    widget_id: int,
+    db: Annotated[AsyncSession, Depends(async_session)],
+    widget_service: Annotated[WidgetService, Depends(get_widget_service)],
+) -> dict[str, Any]:
+    """Get a widget by id."""
+    try:
+        widget = await widget_service.get_by_id(widget_id, db)
+        if widget is None:
+            raise HTTPException(status_code=404, detail=f"Widget {widget_id} not found")
+        return widget
+    except Exception as e:
+        http_exc = handle_exception(e)
+        if http_exc:
+            raise http_exc
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 ```
 
-That's it! The boilerplate handles the rest.
-
-## Common Endpoint Patterns
-
-### 1. Get Single Item
+Register the router in `interfaces/api/v1/__init__.py`:
 
 ```python
-@router.get("/{user_id}", response_model=UserRead)
-async def get_user(
-    user_id: int,
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    user = await crud_users.get(db=db, id=user_id, schema_to_select=UserRead)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+from ....modules.widgets.routes import router as widgets_router
+
+router.include_router(widgets_router, prefix="/widgets")
 ```
 
-### 2. Get Multiple Items (with Pagination)
+The endpoint is now live at `GET /api/v1/widgets/{widget_id}`.
+
+## Common Patterns
+
+The pattern across every module is the same:
+
+1. **Routes** define HTTP shape and delegate to a service
+2. **Service** holds business logic (permission checks, multi-step orchestration)
+3. **CRUD** does the database I/O
+
+Below are the canonical patterns. They mirror what's already in `modules/user/routes.py`, `modules/tier/routes.py`, etc.
+
+### Get a Single Item
 
 ```python
-from fastcrud import PaginatedListResponse, paginated_response
+@router.get("/{widget_id}", response_model=WidgetRead)
+async def get_widget(
+    widget_id: int,
+    db: Annotated[AsyncSession, Depends(async_session)],
+    widget_service: Annotated[WidgetService, Depends(get_widget_service)],
+) -> dict[str, Any]:
+    try:
+        widget = await widget_service.get_by_id(widget_id, db)
+        if widget is None:
+            raise HTTPException(status_code=404, detail=f"Widget {widget_id} not found")
+        return widget
+    except Exception as e:
+        http_exc = handle_exception(e)
+        if http_exc:
+            raise http_exc
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
+```
 
-@router.get("/", response_model=PaginatedListResponse[UserRead])
-async def get_users(
+### Get Multiple Items (Paginated)
+
+```python
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+
+
+@router.get("/", response_model=PaginatedListResponse[WidgetRead])
+async def list_widgets(
+    db: Annotated[AsyncSession, Depends(async_session)],
+    widget_service: Annotated[WidgetService, Depends(get_widget_service)],
     page: int = 1,
     items_per_page: int = 10,
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    users = await crud_users.get_multi(
-        db=db,
-        offset=(page - 1) * items_per_page,
+) -> dict[str, Any]:
+    result = await widget_service.get_paginated(
+        skip=compute_offset(page, items_per_page),
         limit=items_per_page,
-        schema_to_select=UserRead,
-        return_as_model=True,
-        return_total_count=True
+        db=db,
     )
-    return paginated_response(
-        crud_data=users,
-        page=page,
-        items_per_page=items_per_page
-    )
+    return paginated_response(crud_data=result, page=page, items_per_page=items_per_page)
 ```
 
-### 3. Create Item
+See [Pagination](pagination.md) for the full pattern.
+
+### Create
 
 ```python
-@router.post("/", response_model=UserRead, status_code=201)
-async def create_user(
-    user_data: UserCreate,
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    # Check if user already exists
-    if await crud_users.exists(db=db, email=user_data.email):
-        raise HTTPException(status_code=409, detail="Email already exists")
-    
-    # Create user
-    new_user = await crud_users.create(db=db, object=user_data)
-    return new_user
+@router.post("/", response_model=WidgetRead, status_code=201)
+async def create_widget(
+    widget: WidgetCreate,
+    db: Annotated[AsyncSession, Depends(async_session)],
+    widget_service: Annotated[WidgetService, Depends(get_widget_service)],
+) -> dict[str, Any]:
+    try:
+        return await widget_service.create(widget, db)
+    except Exception as e:
+        http_exc = handle_exception(e)
+        if http_exc:
+            raise http_exc
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 ```
 
-### 4. Update Item
+The service does the duplicate check / business validation:
 
 ```python
-@router.patch("/{user_id}", response_model=UserRead)
-async def update_user(
-    user_id: int,
-    user_data: UserUpdate,
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    # Check if user exists
-    if not await crud_users.exists(db=db, id=user_id):
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Update user
-    updated_user = await crud_users.update(db=db, object=user_data, id=user_id)
-    return updated_user
+# modules/widgets/service.py
+async def create(self, widget: WidgetCreate, db: AsyncSession) -> dict[str, Any]:
+    if await crud_widgets.exists(db=db, name=widget.name):
+        raise ResourceExistsError("Widget with this name already exists")
+    return await crud_widgets.create(db=db, object=widget, schema_to_select=WidgetRead)
 ```
 
-### 5. Delete Item (Soft Delete)
+### Update
 
 ```python
-@router.delete("/{user_id}")
-async def delete_user(
-    user_id: int,
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    if not await crud_users.exists(db=db, id=user_id):
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    await crud_users.delete(db=db, id=user_id)
-    return {"message": "User deleted"}
+@router.patch("/{widget_id}", response_model=WidgetRead)
+async def update_widget(
+    widget_id: int,
+    values: WidgetUpdate,
+    db: Annotated[AsyncSession, Depends(async_session)],
+    widget_service: Annotated[WidgetService, Depends(get_widget_service)],
+) -> dict[str, Any]:
+    try:
+        return await widget_service.update(widget_id, values, db)
+    except Exception as e:
+        http_exc = handle_exception(e)
+        if http_exc:
+            raise http_exc
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 ```
 
-## Adding Authentication
-
-To require login, add the `get_current_user` dependency:
+### Delete (Soft Delete)
 
 ```python
-@router.get("/me", response_model=UserRead)  
-async def get_my_profile(
-    current_user: Annotated[dict, Depends(get_current_user)]
-):
-    """Get current user's profile."""
-    return current_user
-
-@router.post("/", response_model=UserRead)
-async def create_user(
-    user_data: UserCreate,
-    current_user: Annotated[dict, Depends(get_current_user)],  # Requires login
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    # Only logged-in users can create users
-    new_user = await crud_users.create(db=db, object=user_data)
-    return new_user
+@router.delete("/{widget_id}", status_code=204)
+async def delete_widget(
+    widget_id: int,
+    db: Annotated[AsyncSession, Depends(async_session)],
+    widget_service: Annotated[WidgetService, Depends(get_widget_service)],
+) -> None:
+    try:
+        await widget_service.delete(widget_id, db)
+    except Exception as e:
+        http_exc = handle_exception(e)
+        if http_exc:
+            raise http_exc
+        raise HTTPException(status_code=500, detail="An unexpected error occurred")
 ```
 
-## Adding Admin-Only Endpoints
+`crud_widgets.delete()` flips `is_deleted=True` if the model uses `SoftDeleteMixin`. Use `db_delete()` when you actually want to remove the row.
 
-For admin-only endpoints, use `get_current_superuser`:
+## Authentication
+
+All session-based auth dependencies live in `infrastructure/auth/session/dependencies`.
+
+### Require Login
 
 ```python
-from app.api.dependencies import get_current_superuser
+from ...infrastructure.auth.session.dependencies import get_current_user
 
-@router.delete("/{user_id}/permanent", dependencies=[Depends(get_current_superuser)])
-async def permanently_delete_user(
-    user_id: int,
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    """Admin-only: Permanently delete user from database."""
-    await crud_users.db_delete(db=db, id=user_id)
-    return {"message": "User permanently deleted"}
+
+@router.get("/me", response_model=WidgetRead)
+async def my_widget(
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_session)],
+    widget_service: Annotated[WidgetService, Depends(get_widget_service)],
+) -> dict[str, Any]:
+    return await widget_service.get_by_owner(current_user["id"], db)
 ```
 
-## Query Parameters
+### Optional Auth
 
-### Simple Parameters
+```python
+from ...infrastructure.auth.session.dependencies import get_optional_user
+
+
+@router.get("/", response_model=list[WidgetRead])
+async def list_widgets(
+    user: Annotated[dict[str, Any] | None, Depends(get_optional_user)],
+    ...
+):
+    # Show extra fields when logged in
+    ...
+```
+
+### Superuser Only
+
+```python
+from ...infrastructure.auth.session.dependencies import get_current_superuser
+
+
+@router.delete("/{widget_id}/permanent")
+async def hard_delete_widget(
+    widget_id: int,
+    db: Annotated[AsyncSession, Depends(async_session)],
+    widget_service: Annotated[WidgetService, Depends(get_widget_service)],
+    _: Annotated[dict[str, Any], Depends(get_current_superuser)],
+) -> dict[str, str]:
+    await widget_service.permanent_delete(widget_id, db)
+    return {"message": "Widget permanently deleted"}
+```
+
+The leading underscore on the dependency-only parameter is the convention used across the boilerplate.
+
+### API Key Authentication
+
+For machine-to-machine clients, see [Authentication](../authentication/index.md). API keys are managed via the `/api/v1/api-keys/*` endpoints in `modules/api_keys/routes.py`.
+
+## Path & Query Parameters
+
+### Path Parameters
+
+```python
+@router.get("/{widget_id}")
+async def get_widget(widget_id: int, ...):
+    ...
+```
+
+FastAPI validates `widget_id` is an int automatically. Invalid input returns `422`.
+
+### Simple Query Parameters
 
 ```python
 @router.get("/search")
-async def search_users(
-    name: str | None = None,        # Optional string
-    age: int | None = None,         # Optional integer  
-    is_active: bool = True,         # Boolean with default
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    filters = {"is_active": is_active}
-    if name:
-        filters["name"] = name
-    if age:
-        filters["age"] = age
-        
-    users = await crud_users.get_multi(db=db, **filters)
-    return users["data"]
+async def search_widgets(
+    db: Annotated[AsyncSession, Depends(async_session)],
+    widget_service: Annotated[WidgetService, Depends(get_widget_service)],
+    name: str | None = None,
+    is_active: bool = True,
+) -> list[dict[str, Any]]:
+    return await widget_service.search(db=db, name=name, is_active=is_active)
 ```
 
-### Parameters with Validation
+### Query Validation
 
 ```python
 from fastapi import Query
 
+
 @router.get("/")
-async def get_users(
-    page: Annotated[int, Query(ge=1)] = 1,                    # Must be >= 1
-    limit: Annotated[int, Query(ge=1, le=100)] = 10,          # Between 1-100
-    search: Annotated[str | None, Query(max_length=50)] = None, # Max 50 chars
-    db: Annotated[AsyncSession, Depends(async_get_db)]
+async def list_widgets(
+    db: Annotated[AsyncSession, Depends(async_session)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    items_per_page: Annotated[int, Query(ge=1, le=100)] = 10,
+    search: Annotated[str | None, Query(max_length=50)] = None,
 ):
-    # Use the validated parameters
-    users = await crud_users.get_multi(
-        db=db,
-        offset=(page - 1) * limit,
-        limit=limit
-    )
-    return users["data"]
+    ...
 ```
 
 ## Error Handling
 
-The boilerplate includes custom exceptions you can use:
+The boilerplate uses two layers of exceptions:
+
+### Domain exceptions (services)
+
+Defined in `modules/common/exceptions.py`:
+
+- `ResourceNotFoundError`
+- `ResourceExistsError`
+- `PermissionDeniedError`
+- `UserNotFoundError`, `UserExistsError`
+- `TierNotFoundError`
+- `ValidationError`
+
+Service methods raise these — they don't know about HTTP.
+
+### HTTP exceptions (routes)
+
+Re-exported from FastCRUD in `infrastructure/auth/http_exceptions.py`:
+
+- `HTTPException` (the FastAPI base)
+- `BadRequestException` — 400
+- `UnauthorizedException` — 401
+- `ForbiddenException` — 403
+- `NotFoundException` — 404
+- `UnprocessableEntityException` — 422
+- `DuplicateValueException` — 409
+- `RateLimitException` — 429
+- `CSRFException` — 403 with `X-CSRF-Error` header (defined locally for CSRF flows)
+
+### The `handle_exception` Bridge
+
+Routes wrap their work in a `try/except` and let `handle_exception()` map domain errors to HTTP errors:
 
 ```python
-from app.core.exceptions.http_exceptions import (
-    NotFoundException, 
-    DuplicateValueException,
-    ForbiddenException
-)
+from ..common.utils.error_handler import handle_exception
 
-@router.get("/{user_id}")
-async def get_user(user_id: int, db: AsyncSession):
-    user = await crud_users.get(db=db, id=user_id)
-    if not user:
-        raise NotFoundException("User not found")  # Returns 404
-    return user
 
-@router.post("/")
-async def create_user(user_data: UserCreate, db: AsyncSession):
-    if await crud_users.exists(db=db, email=user_data.email):
-        raise DuplicateValueException("Email already exists")  # Returns 409
-    
-    return await crud_users.create(db=db, object=user_data)
+try:
+    return await widget_service.update(widget_id, values, db)
+except Exception as e:
+    http_exc = handle_exception(e)
+    if http_exc:
+        raise http_exc
+    raise HTTPException(status_code=500, detail="An unexpected error occurred")
 ```
+
+`handle_exception` returns the matching HTTP exception (or `None` for unrecognized errors, which become a 500).
+
+### Direct HTTP Exceptions
+
+When you have an immediate HTTP-shaped failure with no service involvement, raise directly:
+
+```python
+from ...infrastructure.auth.http_exceptions import NotFoundException
+
+
+@router.get("/{name}", response_model=TierRead)
+async def get_tier_by_name(...):
+    try:
+        return await tier_service.get_by_name(name, db)
+    except TierNotFoundError:
+        raise NotFoundException("Tier not found")
+```
+
+This pattern is used in `modules/tier/routes.py`. See [Exceptions](exceptions.md) for the full picture.
 
 ## File Uploads
 
 ```python
-from fastapi import UploadFile, File
+from fastapi import File, UploadFile
+
 
 @router.post("/{user_id}/avatar")
 async def upload_avatar(
     user_id: int,
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(async_session)],
     file: UploadFile = File(...),
-    current_user: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    # Check file type
-    if not file.content_type.startswith('image/'):
+) -> dict[str, str]:
+    if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image")
-    
-    # Save file and update user
-    # ... file handling logic ...
-    
+
+    # ...persist the file via your storage backend, then update the user...
     return {"message": "Avatar uploaded successfully"}
 ```
 
-## Creating New Endpoints
+The boilerplate doesn't ship a default storage backend; pick one (local disk, S3, GCS) and add it as a settings group when you need it.
 
-### Step 1: Create the Router File
+## Adding a New Endpoint Module
 
-Create `src/app/api/v1/posts.py`:
+The full flow for adding `widgets`:
 
-```python
-from fastapi import APIRouter, Depends, HTTPException
-from typing import Annotated
+### 1. Create the Module
 
-from app.core.db.database import async_get_db
-from app.crud.crud_posts import crud_posts  # You'll create this
-from app.schemas.post import PostRead, PostCreate, PostUpdate  # You'll create these
-from app.api.dependencies import get_current_user
-
-router = APIRouter(prefix="/posts", tags=["posts"])
-
-@router.get("/", response_model=list[PostRead])
-async def get_posts(db: Annotated[AsyncSession, Depends(async_get_db)]):
-    posts = await crud_posts.get_multi(db=db, schema_to_select=PostRead)
-    return posts["data"]
-
-@router.post("/", response_model=PostRead, status_code=201)
-async def create_post(
-    post_data: PostCreate,
-    current_user: Annotated[dict, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_get_db)]
-):
-    # Add current user as post author
-    post_dict = post_data.model_dump()
-    post_dict["author_id"] = current_user["id"]
-    
-    new_post = await crud_posts.create(db=db, object=post_dict)
-    return new_post
+```bash
+mkdir -p backend/src/modules/widgets
+touch backend/src/modules/widgets/__init__.py
 ```
 
-### Step 2: Register the Router
+### 2. Add the Stack
 
-In `src/app/api/v1/__init__.py`, add:
+| File | Contents |
+|------|----------|
+| `models.py` | SQLAlchemy `Widget` model (see [Models](../database/models.md)) |
+| `schemas.py` | `WidgetCreate`, `WidgetRead`, `WidgetUpdate` (see [Schemas](../database/schemas.md)) |
+| `crud.py` | `crud_widgets: FastCRUD = FastCRUD(Widget)` |
+| `service.py` | `WidgetService` with `create`, `get_by_id`, `update`, `delete` methods |
+| `routes.py` | `APIRouter` with the endpoints |
+
+### 3. Register the Model
+
+In `backend/src/modules/__init__.py`:
 
 ```python
-from .posts import router as posts_router
+from .widgets.models import Widget
 
-api_router.include_router(posts_router)
+__all__ = [..., "Widget"]
 ```
 
-### Step 3: Test Your Endpoints
+### 4. Mount the Router
 
-Your new endpoints will be available at:
-- `GET /api/v1/posts/` - Get all posts
-- `POST /api/v1/posts/` - Create new post (requires login)
+In `backend/src/interfaces/api/v1/__init__.py`:
+
+```python
+from ....modules.widgets.routes import router as widgets_router
+
+router.include_router(widgets_router, prefix="/widgets")
+```
+
+### 5. Generate a Migration
+
+```bash
+cd backend
+uv run alembic revision --autogenerate -m "Add widgets table"
+uv run alembic upgrade head
+```
+
+### 6. Test
+
+```bash
+curl http://localhost:8000/api/v1/widgets/
+```
+
+Your routes are now visible in `/docs`.
 
 ## Best Practices
 
-1. **Always use the database dependency**: `Depends(async_get_db)`
-2. **Use existing CRUD methods**: `crud_users.get()`, `crud_users.create()`, etc.
-3. **Check if items exist before operations**: Use `crud_users.exists()`
-4. **Use proper HTTP status codes**: `status_code=201` for creation
-5. **Add authentication when needed**: `Depends(get_current_user)`
-6. **Use response models**: `response_model=UserRead`
-7. **Handle errors with custom exceptions**: `NotFoundException`, `DuplicateValueException`
+1. **Delegate to a service** — keep `routes.py` thin. Routes handle HTTP; services hold rules.
+2. **Use the `handle_exception` pattern** — uniform error translation across the codebase.
+3. **Prefer `schema_to_select=`** — only return the columns the response model needs.
+4. **Use `*Update` schemas with all fields optional** — partial updates are the convention.
+5. **Match status codes to actions**: 201 on create, 204 on delete-with-no-body, 200 default.
+6. **Keep route signatures consistent** — `db` and `<feature>_service` injected via `Annotated[..., Depends(...)]`, dependency-only auth as `_`.
+7. **Don't import models across modules** — except for foreign-key relationships (and even then via `TYPE_CHECKING`).
 
 ## What's Next
 
-Now that you understand basic endpoints:
-
-- **[Pagination](pagination.md)** - Add pagination to your endpoints<br>
-- **[Exceptions](exceptions.md)** - Custom error handling and HTTP exceptions<br>
-- **[CRUD Operations](../database/crud.md)** - Understand the CRUD layer<br>
-
-The boilerplate provides everything you need - just follow these patterns! 
+- **[Pagination](pagination.md)** — Paginate list endpoints with `PaginatedListResponse`
+- **[Exceptions](exceptions.md)** — The full exception model
+- **[API Versioning](versioning.md)** — How `/api/v1/` is wired and how to add `/api/v2/`
+- **[CRUD Operations](../database/crud.md)** — The data layer below your service

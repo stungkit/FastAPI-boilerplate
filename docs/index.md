@@ -44,9 +44,8 @@ This boilerplate leverages cutting-edge Python technologies:
 - **[SQLAlchemy 2.0](https://docs.sqlalchemy.org/en/20/)** - Python SQL toolkit and Object Relational Mapper
 - **[PostgreSQL](https://www.postgresql.org)** - Advanced open source relational database
 - **[Redis](https://redis.io)** - In-memory data store for caching and message brokering
-- **[ARQ](https://arq-docs.helpmanual.io)** - Job queues and RPC with asyncio and Redis
+- **[Taskiq](https://taskiq-python.github.io/)** - Async-first task queue with Redis/RabbitMQ brokers
 - **[Docker](https://docs.docker.com/compose/)** - Containerization for easy deployment
-- **[NGINX](https://nginx.org/en/)** - High-performance web server for reverse proxy and load balancing
 
 ## Key Features
 
@@ -54,14 +53,14 @@ This boilerplate leverages cutting-edge Python technologies:
 - Fully async architecture
 - Pydantic V2 for ultra-fast data validation
 - SQLAlchemy 2.0 with efficient query patterns
-- Built-in caching with Redis
-- Horizontal scaling with NGINX load balancing
+- Built-in caching with Redis or Memcached
 
 ### Security & Authentication
-- JWT-based authentication with refresh tokens
-- Cookie-based secure token storage
+- Server-side session authentication with secure HTTP-only cookies
+- OAuth 2.0 sign-in (Google, with GitHub provider scaffolded) using PKCE
+- API keys with per-key permissions and usage tracking
+- CSRF protection and login rate limiting
 - Role-based access control with user tiers
-- Rate limiting to prevent abuse
 - Production-ready security configurations
 
 ### Developer Experience
@@ -76,24 +75,32 @@ This boilerplate leverages cutting-edge Python technologies:
 - Environment-based configuration
 - Structured logging
 - Health checks and monitoring
-- NGINX reverse proxy setup
-- Gunicorn with Uvicorn workers
 - Database connection pooling
+- Async task processing with Taskiq workers
 
 ## Quick Start
 
-Get up and running in less than 5 minutes:
+Get up and running in less than 5 minutes. Pick whichever fits your workflow:
 
-```bash
-# Clone the repository
-git clone https://github.com/benavlabs/fastapi-boilerplate
-cd fastapi-boilerplate
+=== "Local with uv"
 
-# Start with Docker Compose
-docker compose up
-```
+    ```bash
+    git clone https://github.com/benavlabs/fastapi-boilerplate
+    cd fastapi-boilerplate/backend
+    uv sync --extra dev
+    cp .env.example .env  # then edit values as needed
+    uv run fastapi dev src/interfaces/main.py
+    ```
 
-That's it! Your API will be available at `http://localhost:8000/docs`
+=== "Docker Compose"
+
+    ```bash
+    git clone https://github.com/benavlabs/fastapi-boilerplate
+    cd fastapi-boilerplate/backend
+    docker compose up
+    ```
+
+Your API will be available at `http://localhost:8000/docs`
 
 **[Continue with the Getting Started Guide →](getting-started/index.md)**
 

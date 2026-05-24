@@ -1,198 +1,329 @@
 # Authentication & Security
 
-Learn how to implement secure authentication in your FastAPI application. The boilerplate provides a complete JWT-based authentication system with user management, permissions, and security best practices.
+The boilerplate uses **server-side sessions with HTTP-only cookies** — not JWT. Sessions are stored in Redis (or memory/memcached, configurable), CSRF-protected, and rate-limited at the login endpoint.
+
+For machine-to-machine clients, the boilerplate ships **API keys** with per-key permissions and usage tracking.
 
 ## What You'll Learn
 
-- **[JWT Tokens](jwt-tokens.md)** - Understand access and refresh token management
-- **[User Management](user-management.md)** - Handle registration, login, and user profiles
-- **[Permissions](permissions.md)** - Implement role-based access control and authorization
+- **[Sessions](sessions.md)** - Server-side sessions, cookies, and CSRF protection
+- **[User Management](user-management.md)** - Registration, login, profile operations
+- **[Permissions](permissions.md)** - Role-based access control and resource ownership
 
-## Authentication Overview
+## Why Sessions, Not JWT
 
-The system uses JWT tokens with refresh token rotation for secure, stateless authentication:
+The original boilerplate used JWT with refresh tokens and a token blacklist. We replaced that with sessions because:
 
-```python
-# Basic login flow
-@router.post("/login", response_model=Token)
-async def login_for_access_token(response: Response, form_data: OAuth2PasswordRequestForm):
-    user = await authenticate_user(form_data.username, form_data.password, db)
-    access_token = await create_access_token(data={"sub": user["username"]})
-    refresh_token = await create_refresh_token(data={"sub": user["username"]})
-    
-    # Set secure HTTP-only cookie for refresh token
-    response.set_cookie("refresh_token", refresh_token, httponly=True, secure=True)
-    return {"access_token": access_token, "token_type": "bearer"}
+- **Logout is trivial.** Delete the session row, done. No blacklist to maintain.
+- **Rotating credentials is trivial.** Update the session record. No need to wait for tokens to expire.
+- **CSRF is built in.** Server-side sessions naturally pair with double-submit CSRF tokens.
+- **Storage is server-side.** No risk of accidentally leaking long-lived tokens via XSS to client storage.
+- **Sessions match how most users actually want to think about authentication.** "Is this person logged in?" is a database question, not a cryptographic one.
+
+If you specifically need stateless tokens (e.g. for inter-service auth where you can't share a session store), use **API keys** — they're stateless from the client's perspective and authenticated server-side.
+
+## Authentication Mechanisms
+
+The boilerplate supports three auth pathways. They coexist; you pick the right one per endpoint.
+
+### 1. Sessions (Browser Clients)
+
+```bash
+# Log in — server sets the session cookie and returns a CSRF token
+curl -X POST "http://localhost:8000/api/v1/auth/login" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=admin&password=your_admin_password" \
+  -c cookies.txt
+# → { "csrf_token": "..." }
+
+# Subsequent requests — send the cookie back
+curl http://localhost:8000/api/v1/users/me -b cookies.txt
+
+# Log out
+curl -X POST http://localhost:8000/api/v1/auth/logout -b cookies.txt
 ```
+
+Routes use `Depends(get_current_user)` to require an authenticated session.
+
+### 2. OAuth (Google)
+
+For social sign-in — Google OAuth 2.0 with PKCE is wired up. The user is redirected to Google, signs in, and is bounced back to a callback that creates a session.
+
+```bash
+# Start the flow
+curl http://localhost:8000/api/v1/auth/oauth/google
+# → { "url": "https://accounts.google.com/...?state=..." }
+
+# After the user signs in at Google, they hit the callback:
+# GET /api/v1/auth/oauth/callback/google?code=...&state=...
+# The server creates a session and either redirects or returns JSON.
+```
+
+A GitHub OAuth provider is **scaffolded** in `infrastructure/auth/oauth/providers/github.py` but no GitHub callback routes are wired yet. Wire those up in `infrastructure/auth/routes.py` if you need GitHub sign-in.
+
+### 3. API Keys (Machine-to-Machine)
+
+For server-to-server clients, programs, scripts, integrations:
+
+```bash
+# Create a key (requires an authenticated session)
+curl -X POST "http://localhost:8000/api/v1/api-keys/" \
+  -H "Content-Type: application/json" \
+  -b cookies.txt \
+  -d '{"name": "Integration Key", "permissions": {}, "usage_limits": {}}'
+# → { "key": "shown ONCE — store securely", ... }
+```
+
+The full key is returned only on creation. Each key has its own permissions, usage limits, and audit trail (`KeyUsage` rows).
 
 ## Key Features
 
-### JWT Token System
-- **Access tokens**: Short-lived (30 minutes), for API requests
-- **Refresh tokens**: Long-lived (7 days), stored in secure cookies
-- **Token blacklisting**: Secure logout implementation
-- **Automatic expiration**: Built-in token lifecycle management
+### Server-Side Sessions
+
+- **Session storage**: Redis by default; memory/memcached available (`SESSION_BACKEND` env var)
+- **HTTP-only cookies**: `session_id` cookie cannot be read by JavaScript
+- **CSRF tokens**: Returned on login, also set as a cookie, must be sent in `X-CSRF-Token` for state-changing requests
+- **Configurable timeout**: `SESSION_TIMEOUT_MINUTES`, `SESSION_COOKIE_MAX_AGE`
+- **Per-user limits**: `MAX_SESSIONS_PER_USER` caps simultaneous sessions per account
+- **Automatic cleanup**: `SESSION_CLEANUP_INTERVAL_MINUTES` controls expiry sweeps
 
 ### User Management
-- **Flexible authentication**: Username or email login
-- **Secure passwords**: bcrypt hashing with salt
-- **Profile management**: Complete user CRUD operations
-- **Soft delete**: User deactivation without data loss
+
+- **Username or email** login (the same `/api/v1/auth/login` endpoint accepts either)
+- **bcrypt** password hashing
+- **Soft delete** for user records — accounts are deactivated, not destroyed (toggle via `is_deleted`)
+- **GDPR/LGPD anonymization** endpoint for hard-clearing PII (`DELETE /api/v1/users/db/{username}`)
+- **OAuth flag** on the user model (`google_id`, `github_id`, `oauth_provider`)
 
 ### Permission System
-- **Superuser privileges**: Administrative access control
-- **Resource ownership**: User-specific data access
-- **User tiers**: Subscription-based feature access
-- **Rate limiting**: Per-user and per-tier API limits
+
+- **Superuser flag** on `User.is_superuser` for admin-only routes
+- **Tier-based** access via the `Tier` model — every user belongs to a tier, and rate limits are configured per tier path
+- **Resource ownership** checks live in services (the route doesn't decide who owns what)
+
+### Login Rate Limiting
+
+The login endpoint tracks failed attempts per IP+username. Configurable:
+
+```env
+LOGIN_MAX_ATTEMPTS=5
+LOGIN_WINDOW_MINUTES=15
+```
+
+When the limit is hit, `POST /api/v1/auth/login` returns `401 Unauthorized: Too many failed login attempts. Please try again later.`
 
 ## Authentication Patterns
 
-### Endpoint Protection
+All session deps live in `src/infrastructure/auth/session/dependencies.py`.
+
+### Required Authentication
 
 ```python
-# Required authentication
-@router.get("/protected")
-async def protected_endpoint(current_user: dict = Depends(get_current_user)):
-    return {"message": f"Hello {current_user['username']}"}
+from ...infrastructure.auth.session.dependencies import get_current_user
 
-# Optional authentication
-@router.get("/public")
-async def public_endpoint(user: dict | None = Depends(get_optional_user)):
-    if user:
-        return {"premium_content": True}
-    return {"premium_content": False}
-
-# Superuser only
-@router.get("/admin", dependencies=[Depends(get_current_superuser)])
-async def admin_endpoint():
-    return {"admin_data": "sensitive"}
-```
-
-### Resource Ownership
-
-```python
-@router.patch("/posts/{post_id}")
-async def update_post(post_id: int, current_user: dict = Depends(get_current_user)):
-    post = await crud_posts.get(db=db, id=post_id)
-    
-    # Check ownership or admin privileges
-    if post["created_by_user_id"] != current_user["id"] and not current_user["is_superuser"]:
-        raise ForbiddenException("Cannot update other users' posts")
-    
-    return await crud_posts.update(db=db, id=post_id, object=updates)
-```
-
-## Security Features
-
-### Token Security
-- Short-lived access tokens limit exposure
-- HTTP-only refresh token cookies prevent XSS
-- Token blacklisting enables secure logout
-- Configurable token expiration times
-
-### Password Security
-- bcrypt hashing with automatic salt generation
-- Configurable password complexity requirements
-- No plain text passwords stored anywhere
-- Rate limiting on authentication endpoints
-
-### API Protection
-- CORS policies for cross-origin request control
-- Rate limiting prevents brute force attacks
-- Input validation prevents injection attacks
-- Consistent error messages prevent information disclosure
-
-## Configuration
-
-### JWT Settings
-```env
-SECRET_KEY="your-super-secret-key-here"
-ALGORITHM="HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-REFRESH_TOKEN_EXPIRE_DAYS=7
-```
-
-### Security Settings
-```env
-# Cookie security
-COOKIE_SECURE=true
-COOKIE_SAMESITE="lax"
-
-# Password requirements
-PASSWORD_MIN_LENGTH=8
-ENABLE_PASSWORD_COMPLEXITY=true
-```
-
-## Getting Started
-
-Follow this progressive learning path:
-
-### 1. **[JWT Tokens](jwt-tokens.md)** - Foundation
-Understand how JWT tokens work, including access and refresh token management, verification, and blacklisting.
-
-### 2. **[User Management](user-management.md)** - Core Features
-Implement user registration, login, profile management, and administrative operations.
-
-### 3. **[Permissions](permissions.md)** - Access Control
-Set up role-based access control, resource ownership checking, and tier-based permissions.
-
-## Implementation Examples
-
-### Quick Authentication Setup
-
-```python
-# Protect an endpoint
-@router.get("/my-data")
-async def get_my_data(current_user: dict = Depends(get_current_user)):
-    return await get_user_specific_data(current_user["id"])
-
-# Check user permissions
-def check_tier_access(user: dict, required_tier: str):
-    if not user.get("tier") or user["tier"]["name"] != required_tier:
-        raise ForbiddenException(f"Requires {required_tier} tier")
-
-# Custom authentication dependency
-async def get_premium_user(current_user: dict = Depends(get_current_user)):
-    check_tier_access(current_user, "Pro")
+@router.get("/me", response_model=UserRead)
+async def me(
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> dict[str, Any]:
     return current_user
 ```
 
-### Frontend Integration
+Returns 401 if the session cookie is missing or invalid.
+
+### Optional Authentication
+
+```python
+from ...infrastructure.auth.session.dependencies import get_optional_user
+
+@router.get("/")
+async def list_things(
+    user: Annotated[dict[str, Any] | None, Depends(get_optional_user)],
+):
+    # Logged-in users see extras; anonymous users still get a response
+    if user is not None:
+        return {"premium": True}
+    return {"premium": False}
+```
+
+### Superuser Only
+
+```python
+from ...infrastructure.auth.session.dependencies import get_current_superuser
+
+@router.delete("/{username}/permanent")
+async def gdpr_delete_user(
+    username: str,
+    db: Annotated[AsyncSession, Depends(async_session)],
+    user_service: Annotated[UserService, Depends(get_user_service)],
+    _: Annotated[dict[str, Any], Depends(get_current_superuser)],
+) -> dict[str, str]:
+    ...
+```
+
+The leading underscore is the codebase's convention for dependency-only parameters.
+
+### Resource Ownership
+
+Ownership is checked in the service layer, not in the route:
+
+```python
+# modules/user/service.py
+async def verify_user_permission(
+    self,
+    current_user: dict[str, Any],
+    target_username: str,
+    action: str,
+) -> None:
+    if current_user["username"] != target_username and not current_user["is_superuser"]:
+        raise PermissionDeniedError(f"Cannot {action} for another user")
+```
+
+The route delegates and the service raises `PermissionDeniedError` (which auto-maps to 403). See [Exceptions](../api/exceptions.md) for the mapping layer.
+
+## Security Features
+
+### Session Security
+
+- HTTP-only `session_id` cookie — JavaScript can't read it (XSS-safe)
+- `Secure` cookies in non-dev environments (`SESSION_SECURE_COOKIES=true`)
+- CSRF token validation for state-changing requests (`CSRF_ENABLED=true`)
+- IP and user-agent recorded with each session
+- Per-user session count cap (`MAX_SESSIONS_PER_USER`)
+
+### Password Security
+
+- bcrypt hashing with automatic salt
+- Pydantic validation enforces minimum length and complexity at the schema level (`UserCreate.password`)
+- Plaintext passwords are never stored or logged
+- Login rate limiting prevents credential stuffing
+
+### Production Validator
+
+When `ENVIRONMENT=production` and `PRODUCTION_SECURITY_VALIDATION_ENABLED=true` (both default), the app refuses to start if it finds insecure settings:
+
+- Default `SECRET_KEY` value
+- `DEBUG=true`
+- `CORS_ORIGINS=*`
+
+`PRODUCTION_SECURITY_STRICT_MODE=true` makes the validator stricter still.
+
+## Configuration
+
+The full reference is in [Environment Variables](../configuration/environment-variables.md). The most relevant settings:
+
+```env
+# Sessions
+SESSION_TIMEOUT_MINUTES=30
+SESSION_CLEANUP_INTERVAL_MINUTES=15
+MAX_SESSIONS_PER_USER=5
+SESSION_SECURE_COOKIES=true
+SESSION_BACKEND=redis             # redis | memory | memcached
+SESSION_COOKIE_MAX_AGE=86400
+
+# CSRF
+CSRF_ENABLED=true                  # set false for dev/test
+
+# Login rate limiting
+LOGIN_MAX_ATTEMPTS=5
+LOGIN_WINDOW_MINUTES=15
+
+# OAuth
+OAUTH_REDIRECT_BASE_URL=http://localhost:8000
+OAUTH_GOOGLE_CLIENT_ID=
+OAUTH_GOOGLE_CLIENT_SECRET=
+OAUTH_GITHUB_CLIENT_ID=            # provider scaffolded; routes not wired
+OAUTH_GITHUB_CLIENT_SECRET=
+
+# Security
+SECRET_KEY=<openssl rand -hex 32>
+PRODUCTION_SECURITY_VALIDATION_ENABLED=true
+PRODUCTION_SECURITY_STRICT_MODE=false
+```
+
+## Quick Examples
+
+### Frontend Login Flow (JavaScript)
 
 ```javascript
-// Basic authentication flow
-class AuthManager {
+class AuthClient {
     async login(username, password) {
-        const response = await fetch('/api/v1/login', {
+        const res = await fetch('/api/v1/auth/login', {
             method: 'POST',
-            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-            body: new URLSearchParams({username, password})
+            credentials: 'include',                   // important — accept cookies
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ username, password }),
         });
-        
-        const tokens = await response.json();
-        localStorage.setItem('access_token', tokens.access_token);
-        return tokens;
+        if (!res.ok) throw new Error('login failed');
+        const { csrf_token } = await res.json();
+        // Store the CSRF token in memory; cookie is set automatically
+        this.csrfToken = csrf_token;
+        return csrf_token;
     }
-    
-    async makeAuthenticatedRequest(url, options = {}) {
-        const token = localStorage.getItem('access_token');
+
+    async post(url, body) {
         return fetch(url, {
-            ...options,
+            method: 'POST',
+            credentials: 'include',
             headers: {
-                ...options.headers,
-                'Authorization': `Bearer ${token}`
-            }
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': this.csrfToken,       // required for state-changing requests
+            },
+            body: JSON.stringify(body),
         });
+    }
+
+    async logout() {
+        await fetch('/api/v1/auth/logout', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'X-CSRF-Token': this.csrfToken },
+        });
+        this.csrfToken = null;
     }
 }
 ```
 
+The `credentials: 'include'` flag is what makes the browser actually send cookies cross-origin. Pair this with proper CORS settings on the server side (`CORS_ALLOW_CREDENTIALS=true`).
+
+### Custom Tier-Based Dependency
+
+You can combine the built-in deps to enforce tier checks:
+
+```python
+from typing import Annotated, Any
+from fastapi import Depends, HTTPException
+
+from ...infrastructure.auth.session.dependencies import get_current_user
+
+
+async def require_tier(
+    tier_name: str,
+    user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> dict[str, Any]:
+    user_tier = user.get("tier") or {}
+    if user_tier.get("name") != tier_name:
+        raise HTTPException(status_code=403, detail=f"Requires {tier_name} tier")
+    return user
+
+
+# Usage with a Pro tier
+@router.get("/premium")
+async def premium_feature(
+    user: Annotated[dict[str, Any], Depends(lambda u=Depends(get_current_user): require_tier("pro", u))],
+):
+    return {"data": "premium content"}
+```
+
+In practice, prefer raising `PermissionDeniedError` from inside a service method so the mapping layer translates it consistently (see [Exceptions](../api/exceptions.md)).
+
+## Getting Started
+
+1. **[Sessions](sessions.md)** — How sessions work, cookie handling, CSRF
+2. **[User Management](user-management.md)** — Registration, login, profile
+3. **[Permissions](permissions.md)** — Role-based and resource-based access control
+
 ## What's Next
 
-Start building your authentication system:
-
-1. **[JWT Tokens](jwt-tokens.md)** - Learn token creation, verification, and lifecycle management
-2. **[User Management](user-management.md)** - Implement registration, login, and profile operations  
-3. **[Permissions](permissions.md)** - Add authorization patterns and access control
-
-The authentication system provides a secure foundation for your API. Each guide includes practical examples and implementation details for production-ready authentication. 
+- **[Environment Variables](../configuration/environment-variables.md)** — All auth-related settings
+- **[Exceptions](../api/exceptions.md)** — How `PermissionDeniedError` and friends become HTTP 403/401
+- **[API Endpoints](../api/endpoints.md)** — Patterns for protecting routes

@@ -1,553 +1,302 @@
 # Settings Classes
 
-Learn how Python settings classes validate, structure, and organize your application configuration. The boilerplate uses Pydantic's `BaseSettings` for type-safe configuration management.
+Settings live in `backend/src/infrastructure/config/settings.py` and are organized as Pydantic `BaseSettings` classes — each class groups related variables, and a single `Settings` class composes them all. Defaults come from `backend/.env` via Starlette's `Config()` loader.
 
 ## Settings Architecture
 
-The main `Settings` class inherits from multiple specialized setting groups:
-
 ```python
-# src/app/core/config.py
+# src/infrastructure/config/settings.py
+from pydantic_settings import BaseSettings
+from starlette.config import Config
+
+config = Config(env_path)  # reads backend/.env
+
+
 class Settings(
-    AppSettings,
-    PostgresSettings,
-    CryptSettings,
-    FirstUserSettings,
-    RedisCacheSettings,
-    ClientSideCacheSettings,
-    RedisQueueSettings,
-    RedisRateLimiterSettings,
-    DefaultRateLimitSettings,
     EnvironmentSettings,
+    DatabaseSettings,
+    CacheSettings,
+    RateLimiterSettings,
     CORSSettings,
+    CompressionSettings,
+    APIDocSettings,
+    AuthSettings,
+    APISettings,
+    AppSettings,
+    AdminSettings,
+    SQLAdminSettings,
+    SecuritySettings,
+    LoggingSettings,
+    TaskiqSettings,
 ):
+    """Main settings class that combines all setting categories."""
+
     pass
 
 
-# Single instance used throughout the app
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    return settings
+```
+
+Anywhere in the app:
+
+```python
+from src.infrastructure.config.settings import get_settings
+
+settings = get_settings()
+print(settings.APP_NAME)
 ```
 
 ## Built-in Settings Groups
 
-### Application Settings
+The actual classes that ship with the boilerplate, all in `src/infrastructure/config/settings.py`:
 
-Basic app metadata and configuration:
+| Class | Covers |
+|-------|--------|
+| `EnvironmentSettings` | `ENVIRONMENT` (production/staging/development/local) |
+| `DatabaseSettings` | All `POSTGRES_*` vars + `DATABASE_URL` computed property |
+| `CacheSettings` | `CACHE_*` (Redis + Memcached + client-side) |
+| `RateLimiterSettings` | `RATE_LIMITER_*` (Redis + Memcached + defaults) |
+| `CORSSettings` | `CORS_*` |
+| `CompressionSettings` | `GZIP_*` |
+| `APIDocSettings` | `ENABLE_DOCS_IN_PRODUCTION`, `OPENAPI_PREFIX` |
+| `AuthSettings` | `SECRET_KEY`, `SESSION_*`, `CSRF_*`, `LOGIN_*`, `OAUTH_*` |
+| `APISettings` | API path overrides (`API_PREFIX`, `DOCS_URL`, `REDOC_URL`) |
+| `AppSettings` | `APP_NAME`, `APP_DESCRIPTION`, `VERSION`, `DEBUG`, contact info |
+| `AdminSettings` | `ADMIN_NAME`, `ADMIN_EMAIL`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `DEFAULT_TIER_NAME` |
+| `SQLAdminSettings` | `ADMIN_ENABLED` |
+| `SecuritySettings` | `PRODUCTION_SECURITY_VALIDATION_ENABLED`, `PRODUCTION_SECURITY_STRICT_MODE` |
+| `LoggingSettings` | All `LOG_*` |
+| `TaskiqSettings` | `TASKIQ_*` (Redis + RabbitMQ + worker tuning) |
+
+## Anatomy of a Settings Group
+
+A typical class:
 
 ```python
-class AppSettings(BaseSettings):
-    APP_NAME: str = "FastAPI"
-    APP_DESCRIPTION: str = "A FastAPI project"
-    APP_VERSION: str = "0.1.0"
-    CONTACT_NAME: str = "Your Name"
-    CONTACT_EMAIL: str = "your.email@example.com"
-    LICENSE_NAME: str = "MIT"
-```
+class DatabaseSettings(BaseSettings):
+    """Database-related settings."""
 
-### Database Settings
+    POSTGRES_USER: str = config("POSTGRES_USER", default="postgres")
+    POSTGRES_PASSWORD: str = config("POSTGRES_PASSWORD", default="postgres")
+    POSTGRES_SERVER: str = config("POSTGRES_SERVER", default="localhost")
+    POSTGRES_PORT: int = config("POSTGRES_PORT", default=5432)
+    POSTGRES_DB: str = config("POSTGRES_DB", default="postgres")
+    POSTGRES_ASYNC_PREFIX: str = config("POSTGRES_ASYNC_PREFIX", default="postgresql+asyncpg://")
+    CREATE_TABLES_ON_STARTUP: bool = config("CREATE_TABLES_ON_STARTUP", default=True, cast=bool)
+    POSTGRES_POOL_SIZE: int = config("POSTGRES_POOL_SIZE", default=20, cast=int)
 
-PostgreSQL connection configuration:
-
-```python
-class PostgresSettings(BaseSettings):
-    POSTGRES_USER: str
-    POSTGRES_PASSWORD: str
-    POSTGRES_SERVER: str = "localhost"
-    POSTGRES_PORT: int = 5432
-    POSTGRES_DB: str
-
-    @computed_field
     @property
     def DATABASE_URL(self) -> str:
+        """Construct the full database URL.
+
+        Falls back to assembling from POSTGRES_* if DATABASE_URL is not set.
+        """
+        direct_url = config("DATABASE_URL", default=None)
+        if direct_url:
+            return direct_url
         return (
-            f"postgresql+asyncpg://{self.POSTGRES_USER}:"
+            f"{self.POSTGRES_ASYNC_PREFIX}{self.POSTGRES_USER}:"
             f"{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:"
             f"{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
 ```
 
-### Security Settings
+Key points:
 
-JWT and authentication configuration:
+- Each field uses `config("VAR_NAME", default=..., cast=...)`. The `Config()` instance is initialized with `backend/.env` so values are loaded at import time.
+- For typed conversion, pass `cast=int`, `cast=bool`, etc.
+- Use `@property` for derived values (like `DATABASE_URL`) — no need for `@computed_field` since callers always go through `get_settings()`.
 
-```python
-class CryptSettings(BaseSettings):
-    SECRET_KEY: str
-    ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+## Adding Custom Settings
 
-    @field_validator("SECRET_KEY")
-    @classmethod
-    def validate_secret_key(cls, v: str) -> str:
-        if len(v) < 32:
-            raise ValueError("SECRET_KEY must be at least 32 characters")
-        return v
-```
-
-### Redis Settings
-
-Separate Redis instances for different services:
+### Basic Custom Group
 
 ```python
-class RedisCacheSettings(BaseSettings):
-    REDIS_CACHE_HOST: str = "localhost"
-    REDIS_CACHE_PORT: int = 6379
+# backend/src/infrastructure/config/settings.py
+
+class StorageSettings(BaseSettings):
+    """File-storage settings."""
+
+    STORAGE_BACKEND: str = config("STORAGE_BACKEND", default="local")     # "local" or "s3"
+    LOCAL_STORAGE_PATH: str = config("LOCAL_STORAGE_PATH", default="./uploads")
+
+    AWS_ACCESS_KEY_ID: str = config("AWS_ACCESS_KEY_ID", default="")
+    AWS_SECRET_ACCESS_KEY: str = config("AWS_SECRET_ACCESS_KEY", default="")
+    AWS_BUCKET_NAME: str = config("AWS_BUCKET_NAME", default="")
+    AWS_REGION: str = config("AWS_REGION", default="us-east-1")
+
+    MAX_UPLOAD_SIZE_BYTES: int = config("MAX_UPLOAD_SIZE_BYTES", default=10_485_760, cast=int)
 
 
-class RedisQueueSettings(BaseSettings):
-    REDIS_QUEUE_HOST: str = "localhost"
-    REDIS_QUEUE_PORT: int = 6379
-
-
-class RedisRateLimiterSettings(BaseSettings):
-    REDIS_RATE_LIMIT_HOST: str = "localhost"
-    REDIS_RATE_LIMIT_PORT: int = 6379
-```
-
-### Rate Limiting Settings
-
-Default rate limiting configuration:
-
-```python
-class DefaultRateLimitSettings(BaseSettings):
-    DEFAULT_RATE_LIMIT_LIMIT: int = 10
-    DEFAULT_RATE_LIMIT_PERIOD: int = 3600  # 1 hour
-```
-
-### Admin User Settings
-
-First superuser account creation:
-
-```python
-class FirstUserSettings(BaseSettings):
-    ADMIN_NAME: str = "Admin"
-    ADMIN_EMAIL: str
-    ADMIN_USERNAME: str = "admin"
-    ADMIN_PASSWORD: str
-
-    @field_validator("ADMIN_EMAIL")
-    @classmethod
-    def validate_admin_email(cls, v: str) -> str:
-        if "@" not in v:
-            raise ValueError("ADMIN_EMAIL must be a valid email")
-        return v
-```
-
-## Creating Custom Settings
-
-### Basic Custom Settings
-
-Add your own settings group:
-
-```python
-class CustomSettings(BaseSettings):
-    CUSTOM_API_KEY: str = ""
-    CUSTOM_TIMEOUT: int = 30
-    ENABLE_FEATURE_X: bool = False
-    MAX_UPLOAD_SIZE: int = 10485760  # 10MB
-
-    @field_validator("MAX_UPLOAD_SIZE")
-    @classmethod
-    def validate_upload_size(cls, v: int) -> int:
-        if v < 1024:  # 1KB minimum
-            raise ValueError("MAX_UPLOAD_SIZE must be at least 1KB")
-        if v > 104857600:  # 100MB maximum
-            raise ValueError("MAX_UPLOAD_SIZE cannot exceed 100MB")
-        return v
-
-
-# Add to main Settings class
 class Settings(
-    AppSettings,
-    PostgresSettings,
-    # ... other settings ...
-    CustomSettings,  # Add your custom settings
+    EnvironmentSettings,
+    DatabaseSettings,
+    # ...existing groups...
+    StorageSettings,        # add yours
 ):
     pass
 ```
 
-### Advanced Custom Settings
+Then add the matching variables to `backend/.env.example` so they're discoverable.
 
-Settings with complex validation and computed fields:
-
-```python
-class EmailSettings(BaseSettings):
-    SMTP_HOST: str = ""
-    SMTP_PORT: int = 587
-    SMTP_USERNAME: str = ""
-    SMTP_PASSWORD: str = ""
-    SMTP_USE_TLS: bool = True
-    EMAIL_FROM: str = ""
-    EMAIL_FROM_NAME: str = ""
-
-    @computed_field
-    @property
-    def EMAIL_ENABLED(self) -> bool:
-        return bool(self.SMTP_HOST and self.SMTP_USERNAME)
-
-    @model_validator(mode="after")
-    def validate_email_config(self) -> "EmailSettings":
-        if self.SMTP_HOST and not self.EMAIL_FROM:
-            raise ValueError("EMAIL_FROM required when SMTP_HOST is set")
-        if self.SMTP_USERNAME and not self.SMTP_PASSWORD:
-            raise ValueError("SMTP_PASSWORD required when SMTP_USERNAME is set")
-        return self
-```
-
-### Feature Flag Settings
-
-Organize feature toggles:
-
-```python
-class FeatureSettings(BaseSettings):
-    # Core features
-    ENABLE_CACHING: bool = True
-    ENABLE_RATE_LIMITING: bool = True
-    ENABLE_BACKGROUND_JOBS: bool = True
-
-    # Optional features
-    ENABLE_ANALYTICS: bool = False
-    ENABLE_EMAIL_NOTIFICATIONS: bool = False
-    ENABLE_FILE_UPLOADS: bool = False
-
-    # Experimental features
-    ENABLE_EXPERIMENTAL_API: bool = False
-    ENABLE_BETA_FEATURES: bool = False
-
-    @model_validator(mode="after")
-    def validate_feature_dependencies(self) -> "FeatureSettings":
-        if self.ENABLE_EMAIL_NOTIFICATIONS and not self.ENABLE_BACKGROUND_JOBS:
-            raise ValueError("Email notifications require background jobs")
-        return self
-```
-
-## Settings Validation
-
-### Field Validation
-
-Validate individual fields:
-
-```python
-class DatabaseSettings(BaseSettings):
-    DB_POOL_SIZE: int = 20
-    DB_MAX_OVERFLOW: int = 30
-    DB_TIMEOUT: int = 30
-
-    @field_validator("DB_POOL_SIZE")
-    @classmethod
-    def validate_pool_size(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError("Pool size must be at least 1")
-        if v > 100:
-            raise ValueError("Pool size should not exceed 100")
-        return v
-
-    @field_validator("DB_TIMEOUT")
-    @classmethod
-    def validate_timeout(cls, v: int) -> int:
-        if v < 5:
-            raise ValueError("Timeout must be at least 5 seconds")
-        return v
-```
-
-### Model Validation
-
-Validate across multiple fields:
-
-```python
-class SecuritySettings(BaseSettings):
-    ENABLE_HTTPS: bool = False
-    SSL_CERT_PATH: str = ""
-    SSL_KEY_PATH: str = ""
-    FORCE_SSL: bool = False
-
-    @model_validator(mode="after")
-    def validate_ssl_config(self) -> "SecuritySettings":
-        if self.ENABLE_HTTPS:
-            if not self.SSL_CERT_PATH:
-                raise ValueError("SSL_CERT_PATH required when HTTPS enabled")
-            if not self.SSL_KEY_PATH:
-                raise ValueError("SSL_KEY_PATH required when HTTPS enabled")
-
-        if self.FORCE_SSL and not self.ENABLE_HTTPS:
-            raise ValueError("Cannot force SSL without enabling HTTPS")
-
-        return self
-```
-
-### Environment-Specific Validation
-
-Different validation rules per environment:
-
-```python
-class EnvironmentSettings(BaseSettings):
-    ENVIRONMENT: str = "local"
-    DEBUG: bool = True
-
-    @model_validator(mode="after")
-    def validate_environment_config(self) -> "EnvironmentSettings":
-        if self.ENVIRONMENT == "production":
-            if self.DEBUG:
-                raise ValueError("DEBUG must be False in production")
-
-        if self.ENVIRONMENT not in ["local", "staging", "production"]:
-            raise ValueError("ENVIRONMENT must be local, staging, or production")
-
-        return self
-```
-
-## Computed Properties
-
-### Dynamic Configuration
-
-Create computed values from other settings:
+### Computed / Derived Values
 
 ```python
 class StorageSettings(BaseSettings):
-    STORAGE_TYPE: str = "local"  # local, s3, gcs
+    STORAGE_BACKEND: str = config("STORAGE_BACKEND", default="local")
+    AWS_ACCESS_KEY_ID: str = config("AWS_ACCESS_KEY_ID", default="")
+    AWS_SECRET_ACCESS_KEY: str = config("AWS_SECRET_ACCESS_KEY", default="")
+    AWS_BUCKET_NAME: str = config("AWS_BUCKET_NAME", default="")
 
-    # Local storage
-    LOCAL_STORAGE_PATH: str = "./uploads"
-
-    # S3 settings
-    AWS_ACCESS_KEY_ID: str = ""
-    AWS_SECRET_ACCESS_KEY: str = ""
-    AWS_BUCKET_NAME: str = ""
-    AWS_REGION: str = "us-east-1"
-
-    @computed_field
     @property
-    def STORAGE_ENABLED(self) -> bool:
-        if self.STORAGE_TYPE == "local":
-            return bool(self.LOCAL_STORAGE_PATH)
-        elif self.STORAGE_TYPE == "s3":
-            return bool(self.AWS_ACCESS_KEY_ID and self.AWS_SECRET_ACCESS_KEY and self.AWS_BUCKET_NAME)
+    def s3_configured(self) -> bool:
+        return bool(self.AWS_ACCESS_KEY_ID and self.AWS_SECRET_ACCESS_KEY and self.AWS_BUCKET_NAME)
+
+    @property
+    def storage_enabled(self) -> bool:
+        if self.STORAGE_BACKEND == "local":
+            return True
+        if self.STORAGE_BACKEND == "s3":
+            return self.s3_configured
         return False
-
-    @computed_field
-    @property
-    def STORAGE_CONFIG(self) -> dict:
-        if self.STORAGE_TYPE == "local":
-            return {"path": self.LOCAL_STORAGE_PATH}
-        elif self.STORAGE_TYPE == "s3":
-            return {
-                "bucket": self.AWS_BUCKET_NAME,
-                "region": self.AWS_REGION,
-                "credentials": {
-                    "access_key": self.AWS_ACCESS_KEY_ID,
-                    "secret_key": self.AWS_SECRET_ACCESS_KEY,
-                },
-            }
-        return {}
 ```
 
-## Organizing Settings
+### Validation
 
-### Service-Based Organization
-
-Group settings by service or domain:
+For richer validation, switch a field's value to use Pydantic validators:
 
 ```python
-# Authentication service settings
-class AuthSettings(BaseSettings):
-    JWT_SECRET_KEY: str
-    JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE: int = 30
-    REFRESH_TOKEN_EXPIRE: int = 7200
-    PASSWORD_MIN_LENGTH: int = 8
+from pydantic import field_validator, model_validator
 
 
-# Notification service settings
-class NotificationSettings(BaseSettings):
-    EMAIL_ENABLED: bool = False
-    SMS_ENABLED: bool = False
-    PUSH_ENABLED: bool = False
+class StorageSettings(BaseSettings):
+    STORAGE_BACKEND: str = config("STORAGE_BACKEND", default="local")
+    MAX_UPLOAD_SIZE_BYTES: int = config("MAX_UPLOAD_SIZE_BYTES", default=10_485_760, cast=int)
 
-    # Email settings
-    SMTP_HOST: str = ""
-    SMTP_PORT: int = 587
+    @field_validator("MAX_UPLOAD_SIZE_BYTES")
+    @classmethod
+    def _check_upload_size(cls, v: int) -> int:
+        if v < 1024:
+            raise ValueError("MAX_UPLOAD_SIZE_BYTES must be at least 1KB")
+        if v > 100 * 1024 * 1024:
+            raise ValueError("MAX_UPLOAD_SIZE_BYTES cannot exceed 100MB")
+        return v
 
-    # SMS settings (example with Twilio)
-    TWILIO_ACCOUNT_SID: str = ""
-    TWILIO_AUTH_TOKEN: str = ""
+    @model_validator(mode="after")
+    def _check_backend(self) -> "StorageSettings":
+        if self.STORAGE_BACKEND not in ("local", "s3"):
+            raise ValueError(f"Unknown STORAGE_BACKEND: {self.STORAGE_BACKEND}")
+        return self
+```
+
+Validators run when `Settings()` is instantiated at startup, so misconfiguration fails fast.
+
+## Enums for Constrained Values
+
+For options with a fixed set of valid values, define a `StrEnum` in `src/infrastructure/config/enums.py` and use it as the default:
+
+```python
+# enums.py
+from enum import StrEnum
 
 
-# Main settings
+class StorageBackend(StrEnum):
+    LOCAL = "local"
+    S3 = "s3"
+
+
+# settings.py
+from .enums import StorageBackend
+
+
+class StorageSettings(BaseSettings):
+    STORAGE_BACKEND: str = config("STORAGE_BACKEND", default=StorageBackend.LOCAL.value)
+```
+
+The boilerplate already does this for `CacheBackend`, `LogFormat`, `LogLevel`, `SessionBackend`, `TaskiqBrokerType`, and `EnvironmentOption`.
+
+## Removing Built-in Groups
+
+If you don't use a feature, drop the corresponding class from the `Settings` MRO:
+
+```python
 class Settings(
-    AppSettings,
-    AuthSettings,
-    NotificationSettings,
-    # ... other settings
-):
-    pass
-```
-
-### Conditional Settings Loading
-
-Load different settings based on environment:
-
-```python
-class BaseAppSettings(BaseSettings):
-    APP_NAME: str = "FastAPI App"
-    DEBUG: bool = False
-
-
-class DevelopmentSettings(BaseAppSettings):
-    DEBUG: bool = True
-    LOG_LEVEL: str = "DEBUG"
-    DATABASE_ECHO: bool = True
-
-
-class ProductionSettings(BaseAppSettings):
-    DEBUG: bool = False
-    LOG_LEVEL: str = "WARNING"
-    DATABASE_ECHO: bool = False
-
-
-def get_settings() -> BaseAppSettings:
-    environment = os.getenv("ENVIRONMENT", "local")
-
-    if environment == "production":
-        return ProductionSettings()
-    else:
-        return DevelopmentSettings()
-
-
-settings = get_settings()
-```
-
-## Removing Unused Services
-
-### Minimal Configuration
-
-Remove services you don't need:
-
-```python
-# Minimal setup without Redis services
-class MinimalSettings(
-    AppSettings,
-    PostgresSettings,
-    CryptSettings,
-    FirstUserSettings,
-    # Removed: RedisCacheSettings
-    # Removed: RedisQueueSettings
-    # Removed: RedisRateLimiterSettings
     EnvironmentSettings,
+    DatabaseSettings,
+    CORSSettings,
+    AuthSettings,
+    APISettings,
+    AppSettings,
+    LoggingSettings,
+    # CacheSettings — removed
+    # RateLimiterSettings — removed
+    # TaskiqSettings — removed
 ):
     pass
 ```
 
-### Service Feature Flags
+You'll also want to:
 
-Use feature flags to conditionally enable services:
-
-```python
-class ServiceSettings(BaseSettings):
-    ENABLE_REDIS: bool = True
-    ENABLE_CELERY: bool = True
-    ENABLE_MONITORING: bool = False
-
-
-class ConditionalSettings(
-    AppSettings,
-    PostgresSettings,
-    CryptSettings,
-    ServiceSettings,
-):
-    # Add Redis settings only if enabled
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-        if self.ENABLE_REDIS:
-            # Dynamically add Redis settings
-            self.__class__ = type("ConditionalSettings", (self.__class__, RedisCacheSettings), {})
-```
+- Remove the now-orphan code that depends on those settings (e.g. cache decorator, taskiq broker, rate limiter middleware)
+- Drop the corresponding env vars from `.env.example`
+- Disable startup of those subsystems in `infrastructure/app_factory.py`
 
 ## Testing Settings
 
-### Test Configuration
-
-Create separate settings for testing:
+The test suite uses fixtures that override settings. The general pattern:
 
 ```python
-class TestSettings(BaseSettings):
-    # Override database for testing
-    POSTGRES_DB: str = "test_database"
-
-    # Disable external services
-    ENABLE_REDIS: bool = False
-    ENABLE_EMAIL: bool = False
-
-    # Speed up tests
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 5
-
-    # Test-specific settings
-    TEST_USER_EMAIL: str = "test@example.com"
-    TEST_USER_PASSWORD: str = "testpassword123"
+import pytest
+from src.infrastructure.config.settings import Settings
 
 
-# Use in tests
 @pytest.fixture
-def test_settings():
-    return TestSettings()
+def test_settings(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "local")
+    monkeypatch.setenv("CACHE_ENABLED", "false")
+    monkeypatch.setenv("RATE_LIMITER_ENABLED", "false")
+    return Settings()
 ```
 
-### Settings Validation Testing
-
-Test your custom settings:
+For one-off overrides without env vars, instantiate the relevant settings class directly with kwargs:
 
 ```python
-def test_custom_settings_validation():
-    # Test valid configuration
-    settings = CustomSettings(CUSTOM_API_KEY="test-key", CUSTOM_TIMEOUT=60, MAX_UPLOAD_SIZE=5242880)  # 5MB
-    assert settings.CUSTOM_TIMEOUT == 60
-
-    # Test validation error
-    with pytest.raises(ValueError, match="MAX_UPLOAD_SIZE cannot exceed 100MB"):
-        CustomSettings(MAX_UPLOAD_SIZE=209715200)  # 200MB
-
-
-def test_settings_computed_fields():
-    settings = StorageSettings(
-        STORAGE_TYPE="s3",
-        AWS_ACCESS_KEY_ID="test-key",
-        AWS_SECRET_ACCESS_KEY="test-secret",
-        AWS_BUCKET_NAME="test-bucket",
-    )
-
-    assert settings.STORAGE_ENABLED is True
-    assert settings.STORAGE_CONFIG["bucket"] == "test-bucket"
+def test_storage_validation():
+    with pytest.raises(ValueError, match="cannot exceed 100MB"):
+        StorageSettings(MAX_UPLOAD_SIZE_BYTES=200_000_000)
 ```
 
 ## Best Practices
 
 ### Organization
 
-- Group related settings in dedicated classes
-- Use descriptive names for settings groups
-- Keep validation logic close to the settings
-- Document complex validation rules
+- Group settings by **subsystem** (cache, auth, taskiq), not by environment
+- Keep validation alongside the field it validates
+- Add a one-line docstring per class so its purpose is obvious
+- Mirror group names in `.env.example` section headers
 
 ### Security
 
-- Validate sensitive settings like secret keys
-- Never set default values for secrets in production
-- Use computed fields to derive connection strings
-- Separate test and production configurations
+- Validate `SECRET_KEY` length / strength when `ENVIRONMENT=production` (the boilerplate already does this via the production security validator)
+- Never set a real default for credentials — leave them blank and let the validator complain
+- Use `@property` to derive connection strings rather than embedding them in env vars
 
 ### Performance
 
-- Use `@computed_field` for expensive calculations
-- Cache settings instances appropriately
-- Avoid complex validation in hot paths
-- Use model validators for cross-field validation
+- The `Settings` instance is created once at import time and shared via `get_settings()` — don't instantiate it per-request
+- Keep validators cheap; they run at startup but they also run if anyone re-instantiates `Settings`
 
 ### Testing
 
-- Create separate test settings classes
-- Test all validation rules
-- Mock external service settings in tests
-- Use dependency injection for settings in tests
+- Use `monkeypatch.setenv(...)` to vary env vars per test
+- Don't reach for the global `settings` in tests when you can pass an instance directly
 
-The settings system provides type safety, validation, and organization for your application configuration. Start with the built-in settings and extend them as your application grows!
+## See Also
+
+- **[Environment Variables](environment-variables.md)** — Full variable reference
+- **[Docker Setup](docker-setup.md)** — How variables flow into Compose
+- **[Environment-Specific](environment-specific.md)** — Recommended values per environment

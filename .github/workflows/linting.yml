@@ -6,21 +6,22 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: 3.11
+      - uses: actions/checkout@v4
 
-    - name: Install uv
-      run: pip install uv
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Create venv
-      run: uv venv
+      - name: Install uv
+        run: pip install uv
 
-    - name: Install package with dev dependencies
-      run: uv pip install -e ".[dev]"
+      - name: Sync workspace
+        # --all-packages is required to include extras from workspace members
+        # (backend's dev extra holds ruff itself).
+        run: uv sync --all-packages --all-extras
 
-    - name: Run Ruff
-      run: uv run ruff check src
+      - name: Ruff check (backend + cli + tests)
+        # --no-sync prevents uv run's implicit re-sync from dropping member
+        # extras (it defaults to no extras and would remove ruff).
+        run: uv run --no-sync ruff check backend/src cli/src backend/tests

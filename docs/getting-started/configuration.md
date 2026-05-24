@@ -1,179 +1,225 @@
 # Configuration
 
-This guide covers the essential configuration steps to get your FastAPI application running quickly.
+This guide covers the essential configuration steps to get your FastAPI application running.
 
 ## Quick Setup
 
-The fastest way to get started is to copy the example environment file and modify just a few values:
+Copy the example environment file and edit a few values:
 
 ```bash
-cp src/.env.example src/.env
+cd backend
+cp .env.example .env
 ```
+
+The full set of variables lives in `backend/.env.example`. The sections below cover the ones you'll most likely want to change.
 
 ## Essential Configuration
 
-Open `src/.env` and set these required values:
+Open `backend/.env` and set these required values.
 
 ### Application Settings
 
 ```env
-# App Settings
-APP_NAME="Your app name here"
-APP_DESCRIPTION="Your app description here"
-APP_VERSION="0.1"
-CONTACT_NAME="Your name"
-CONTACT_EMAIL="Your email"
-LICENSE_NAME="The license you picked"
+APP_NAME=Your app name here
+APP_DESCRIPTION=Your app description here
+VERSION=0.1.0
+CONTACT_NAME=Your name
+CONTACT_EMAIL=your@email.com
+LICENSE_NAME=The license you picked
 ```
 
-### Database Connection
+### Environment Type
 
 ```env
-# Database
-POSTGRES_USER="your_postgres_user"
-POSTGRES_PASSWORD="your_password"
-POSTGRES_SERVER="localhost"  # Use "db" for Docker Compose
-POSTGRES_PORT=5432           # Use 5432 for Docker Compose
-POSTGRES_DB="your_database_name"
+# Options: development, staging, production, local
+ENVIRONMENT=development
 ```
 
-### PGAdmin (Optional)
+- **development**: API docs at `/docs`, `/redoc`, verbose logging
+- **staging**: Structured logs, file output enabled
+- **production**: JSON logs, security validation, docs gated by `ENABLE_DOCS_IN_PRODUCTION`
+- **local**: Same defaults as development; useful for tests
 
-For database administration:
+### Database
 
 ```env
-# PGAdmin
-PGADMIN_DEFAULT_EMAIL="your_email_address"
-PGADMIN_DEFAULT_PASSWORD="your_password"
-PGADMIN_LISTEN_PORT=80
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=changeme
+POSTGRES_DB=postgres
+POSTGRES_SERVER=db          # use "localhost" without Docker
+POSTGRES_PORT=5432
+CREATE_TABLES_ON_STARTUP=true
 ```
-
-**To connect to database in PGAdmin:**
-
-1. Login with `PGADMIN_DEFAULT_EMAIL` and `PGADMIN_DEFAULT_PASSWORD`
-1. Click "Add Server"
-1. Use these connection settings:
-   - **Hostname/address**: `db` (if using containers) or `localhost`
-   - **Port**: Value from `POSTGRES_PORT`
-   - **Database**: `postgres` (leave as default)
-   - **Username**: Value from `POSTGRES_USER`
-   - **Password**: Value from `POSTGRES_PASSWORD`
 
 ### Security
 
-Generate a secret key and set it:
+Generate a strong `SECRET_KEY`:
 
 ```bash
-# Generate a secure secret key
-openssl rand -hex 32
+python -c "import secrets; print(secrets.token_urlsafe(64))"
 ```
 
 ```env
-# Cryptography
-SECRET_KEY="your-generated-secret-key-here"  # Result of openssl rand -hex 32
-ALGORITHM="HS256"                            # Default: HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30               # Default: 30
-REFRESH_TOKEN_EXPIRE_DAYS=7                  # Default: 7
+SECRET_KEY=your-generated-secret-key-here
+
+# Production security validation (enabled by default in production)
+PRODUCTION_SECURITY_VALIDATION_ENABLED=true
+PRODUCTION_SECURITY_STRICT_MODE=false
+```
+
+### Sessions
+
+```env
+SESSION_TIMEOUT_MINUTES=30
+SESSION_CLEANUP_INTERVAL_MINUTES=15
+MAX_SESSIONS_PER_USER=5
+SESSION_SECURE_COOKIES=true
+SESSION_BACKEND=redis
+SESSION_COOKIE_MAX_AGE=86400
+
+# CSRF protection (set false to disable in dev/test)
+CSRF_ENABLED=true
+
+# Login rate limiting
+LOGIN_MAX_ATTEMPTS=5
+LOGIN_WINDOW_MINUTES=15
 ```
 
 ### First Admin User
 
+The `setup_initial_data` script reads these on first run:
+
 ```env
-# Admin User
-ADMIN_NAME="your_name"
-ADMIN_EMAIL="your_email"
-ADMIN_USERNAME="your_username"
-ADMIN_PASSWORD="your_password"
+ADMIN_NAME=Admin User
+ADMIN_EMAIL=admin@example.com
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your-secure-password
 ```
 
-### Redis Configuration
+Then run:
 
-```env
-# Redis Cache
-REDIS_CACHE_HOST="localhost"     # Use "redis" for Docker Compose
-REDIS_CACHE_PORT=6379
-
-# Client-side Cache
-CLIENT_CACHE_MAX_AGE=30          # Default: 30 seconds
-
-# Redis Job Queue
-REDIS_QUEUE_HOST="localhost"     # Use "redis" for Docker Compose
-REDIS_QUEUE_PORT=6379
-
-# Redis Rate Limiting
-REDIS_RATE_LIMIT_HOST="localhost"  # Use "redis" for Docker Compose
-REDIS_RATE_LIMIT_PORT=6379
+```bash
+uv run python -m scripts.setup_initial_data
 ```
 
-!!! warning "Redis in Production"
-You may use the same Redis instance for caching and queues while developing, but use separate containers in production.
-
-### Rate Limiting Defaults
+### Cache (Redis or Memcached)
 
 ```env
-# Default Rate Limits
-DEFAULT_RATE_LIMIT_LIMIT=10      # Default: 10 requests
-DEFAULT_RATE_LIMIT_PERIOD=3600   # Default: 3600 seconds (1 hour)
+CACHE_ENABLED=true
+CACHE_BACKEND=redis             # or "memcached"
+DEFAULT_CACHE_EXPIRATION=3600
+
+# Client-side cache (Cache-Control headers)
+CLIENT_CACHE_ENABLED=true
+CLIENT_CACHE_MAX_AGE=60
+
+# Redis settings
+CACHE_REDIS_HOST=redis          # use "localhost" without Docker
+CACHE_REDIS_PORT=6379
+CACHE_REDIS_DB=0
+CACHE_REDIS_PASSWORD=
 ```
 
-### CORS Configuration
-
-Configure Cross-Origin Resource Sharing for your frontend:
+### Rate Limiting
 
 ```env
-# CORS Settings
-CORS_ORIGINS=["*"]                         # Comma-separated origins (use specific domains in production)
-CORS_METHODS=["*"]                         # Comma-separated HTTP methods or "*" for all
-CORS_HEADERS=["*"]                         # Comma-separated headers or "*" for all
+RATE_LIMITER_ENABLED=true
+RATE_LIMITER_BACKEND=redis      # or "memcached"
+RATE_LIMITER_FAIL_OPEN=true
+DEFAULT_RATE_LIMIT_LIMIT=100
+DEFAULT_RATE_LIMIT_PERIOD=60
+
+# Redis (uses DB 1 by default to separate from cache)
+RATE_LIMITER_REDIS_HOST=redis   # use "localhost" without Docker
+RATE_LIMITER_REDIS_PORT=6379
+RATE_LIMITER_REDIS_DB=1
+RATE_LIMITER_REDIS_PASSWORD=
+```
+
+### Background Tasks (Taskiq)
+
+```env
+TASKIQ_ENABLED=true
+TASKIQ_BROKER_TYPE=redis        # or "rabbitmq"
+
+# Redis broker (uses DB 3 by default)
+TASKIQ_REDIS_HOST=redis         # use "localhost" without Docker
+TASKIQ_REDIS_PORT=6379
+TASKIQ_REDIS_DB=3
+TASKIQ_REDIS_PASSWORD=
+
+TASKIQ_WORKER_CONCURRENCY=2
+TASKIQ_MAX_TASKS_PER_WORKER=1000
+```
+
+### CORS
+
+```env
+CORS_ENABLED=true
+CORS_ORIGINS=*                  # comma-separated origins
+CORS_ALLOW_CREDENTIALS=true
+CORS_ALLOW_METHODS=*
+CORS_ALLOW_HEADERS=*
 ```
 
 !!! warning "CORS in Production"
-Never use `"*"` for CORS_ORIGINS in production. Specify exact domains:
-`env     CORS_ORIGINS=["https://yourapp.com","https://www.yourapp.com"]     CORS_METHODS=["GET","POST","PUT","DELETE","PATCH"]     CORS_HEADERS=["Authorization","Content-Type"]     `
+    Never use `*` for `CORS_ORIGINS` in production. Specify exact domains and explicit methods/headers:
 
-### First Tier
+    ```env
+    CORS_ORIGINS=https://yourapp.com,https://www.yourapp.com
+    CORS_ALLOW_METHODS=GET,POST,PUT,DELETE,PATCH
+    CORS_ALLOW_HEADERS=Authorization,Content-Type
+    ```
 
-```env
-# Default Tier
-TIER_NAME="free"
-```
+### OAuth (Optional)
 
-## Environment Types
-
-Set your environment type:
+For Google / GitHub sign-in:
 
 ```env
-ENVIRONMENT="local"  # local, staging, or production
+OAUTH_REDIRECT_BASE_URL=http://localhost:8000
+
+# Google OAuth
+OAUTH_GOOGLE_CLIENT_ID=
+OAUTH_GOOGLE_CLIENT_SECRET=
+
+# GitHub OAuth
+OAUTH_GITHUB_CLIENT_ID=
+OAUTH_GITHUB_CLIENT_SECRET=
 ```
 
-- **local**: API docs available at `/docs`, `/redoc`, and `/openapi.json`
-- **staging**: API docs available to superusers only
-- **production**: API docs completely disabled
+Leave the credentials empty to disable a provider. See [Authentication](../user-guide/authentication/index.md) for the OAuth setup walkthrough.
+
+### Admin Interface
+
+```env
+ADMIN_ENABLED=true              # enables SQLAdmin at /admin
+```
 
 ## Docker Compose Settings
 
-If using Docker Compose, use these values instead:
+When running with Docker Compose, services reach each other by service name. Use these hosts in `.env`:
 
 ```env
-# Docker Compose values
-POSTGRES_SERVER="db"
-REDIS_CACHE_HOST="redis"
-REDIS_QUEUE_HOST="redis"
-REDIS_RATE_LIMIT_HOST="redis"
+POSTGRES_SERVER=db
+CACHE_REDIS_HOST=redis
+RATE_LIMITER_REDIS_HOST=redis
+TASKIQ_REDIS_HOST=redis
 ```
 
-## Optional Services
+## That's It
 
-The boilerplate includes Redis for caching, job queues, and rate limiting. If running locally without Docker, either:
+With these settings, start the app:
 
-1. **Install Redis** and keep the default settings
-1. **Disable Redis services** (see [User Guide - Configuration](../user-guide/configuration/index.md) for details)
+=== "Local with uv"
 
-## That's It!
+    ```bash
+    uv run fastapi dev src/interfaces/main.py
+    ```
 
-With these basic settings configured, you can start the application:
+=== "Docker Compose"
 
-- **Docker Compose**: `docker compose up`
-- **Manual**: `uv run uvicorn src.app.main:app --reload`
+    ```bash
+    docker compose up
+    ```
 
-For detailed configuration options, advanced settings, and production deployment, see the [User Guide - Configuration](../user-guide/configuration/index.md).
+For the full reference and advanced settings, see [User Guide → Configuration](../user-guide/configuration/index.md).

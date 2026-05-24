@@ -1,492 +1,434 @@
 # CRUD Operations
 
-This guide covers all CRUD (Create, Read, Update, Delete) operations available in the FastAPI Boilerplate using FastCRUD, a powerful library that provides consistent and efficient database operations.
+This guide covers the CRUD (Create, Read, Update, Delete) operations available in the boilerplate via [FastCRUD](https://benavlabs.github.io/fastcrud/).
 
 ## Overview
 
-The boilerplate uses [FastCRUD](https://github.com/igorbenav/fastcrud) for all database operations. FastCRUD provides:
+The boilerplate uses **FastCRUD** for all database access. It gives you:
 
-- **Consistent API** across all models
-- **Type safety** with generic type parameters
-- **Automatic pagination** support
-- **Advanced filtering** and joining capabilities
-- **Soft delete** support
-- **Optimized queries** with selective field loading
+- A consistent async API across every model
+- Automatic pagination helpers
+- Built-in soft delete support (when the model has `SoftDeleteMixin`)
+- Selective field loading via `schema_to_select`
+- Joined queries for related data
 
-## CRUD Class Structure
+## Where CRUD Lives
 
-Each model has a corresponding CRUD class that defines the available operations:
+Each module owns its own FastCRUD instance, kept tiny and predictable:
 
 ```python
-# src/app/crud/crud_users.py
+# backend/src/modules/user/crud.py
 from fastcrud import FastCRUD
-from app.models.user import User
-from app.schemas.user import (
-    UserCreateInternal, UserUpdate, UserUpdateInternal, 
-    UserDelete, UserRead
-)
 
-CRUDUser = FastCRUD[
-    User,                # Model class
-    UserCreateInternal,  # Create schema
-    UserUpdate,          # Update schema  
-    UserUpdateInternal,  # Internal update schema
-    UserDelete,          # Delete schema
-    UserRead             # Read schema
-]
-crud_users = CRUDUser(User)
+from .models import User
+
+crud_users: FastCRUD = FastCRUD(User)
+```
+
+```python
+# backend/src/modules/tier/crud.py
+from fastcrud import FastCRUD
+
+from .models import Tier
+
+crud_tiers: FastCRUD = FastCRUD(Tier)
+```
+
+The CRUD instance is then imported by the module's `service.py`, which adds business logic on top — input validation, permission checks, password hashing, multi-step orchestration.
+
+```python
+# Typical service method (modules/user/service.py)
+from .crud import crud_users
+from .schemas import UserCreate, UserCreateInternal, UserRead
+
+
+async def create(self, user: UserCreate, db: AsyncSession) -> dict[str, Any]:
+    if await crud_users.exists(db=db, email=user.email):
+        raise UserExistsError("Email already registered")
+    if await crud_users.exists(db=db, username=user.username):
+        raise UserExistsError("Username already taken")
+
+    payload = user.model_dump()
+    payload["hashed_password"] = get_password_hash(payload.pop("password"))
+    user_internal = UserCreateInternal(**payload)
+
+    return await crud_users.create(db=db, object=user_internal, schema_to_select=UserRead)
 ```
 
 ## Read Operations
 
-### Get Single Record
-
-Retrieve a single record by any field:
+### Get a Single Record
 
 ```python
-# Get user by ID
+# By id
 user = await crud_users.get(db=db, id=user_id)
 
-# Get user by username
-user = await crud_users.get(db=db, username="john_doe")
+# By any indexed field
+user = await crud_users.get(db=db, username="userson")
+user = await crud_users.get(db=db, email="user.userson@example.com")
 
-# Get user by email
-user = await crud_users.get(db=db, email="john@example.com")
-
-# Get with specific fields only
+# Restrict the returned shape with a Pydantic schema
 user = await crud_users.get(
-    db=db, 
-    schema_to_select=UserRead, # Only select fields defined in UserRead
-    id=user_id,
-)
-```
-
-**Real usage from the codebase:**
-
-```python
-# From src/app/api/v1/users.py
-db_user = await crud_users.get(
-    db=db, 
+    db=db,
     schema_to_select=UserRead,
-    username=username, 
+    username=username,
     is_deleted=False,
 )
 ```
 
 ### Get Multiple Records
 
-Retrieve multiple records with filtering and pagination:
-
 ```python
-# Get all users
-users = await crud_users.get_multi(db=db)
-
-# Get with pagination
-users = await crud_users.get_multi(
+# All non-deleted users, first 10
+result = await crud_users.get_multi(
     db=db,
-    offset=0,      # Skip first 0 records
-    limit=10,      # Return maximum 10 records
-)
-
-# Get with filtering
-active_users = await crud_users.get_multi(
-    db=db,
-    is_deleted=False,  # Filter condition
-    offset=compute_offset(page, items_per_page),
-    limit=items_per_page
+    is_deleted=False,
+    offset=0,
+    limit=10,
 )
 ```
 
-**Pagination response structure:**
+`get_multi` returns a dict shaped like:
 
 ```python
 {
-    "data": [
-        {"id": 1, "username": "john", "email": "john@example.com"},
-        {"id": 2, "username": "jane", "email": "jane@example.com"}
-    ],
+    "data": [...],
     "total_count": 25,
-    "has_more": true,
-    "page": 1,
-    "items_per_page": 10
 }
 ```
 
+For full paginated responses (`page` / `has_more` / `items_per_page`), wrap the result with `paginated_response()` — see [Pagination](#pagination).
+
+### Filter Operators
+
+FastCRUD supports `__` operators on field names:
+
+```python
+# Substring match
+await crud_users.get_multi(db=db, username__icontains="john")
+
+# Range
+await crud_users.get_multi(db=db, created_at__gt=cutoff_datetime)
+
+# Set membership
+await crud_users.get_multi(db=db, tier_id__in=[1, 2, 3])
+```
+
+Available operators include `__contains`, `__icontains`, `__startswith`, `__endswith`, `__gt`, `__ge`, `__lt`, `__le`, `__in`, `__not_in`, and others. See the [FastCRUD docs](https://benavlabs.github.io/fastcrud/) for the full list.
+
 ### Check Existence
 
-Check if a record exists without fetching it:
-
 ```python
-# Check if user exists
-user_exists = await crud_users.exists(db=db, email="john@example.com")
-# Returns True or False
-
-# Check if username is available
-username_taken = await crud_users.exists(db=db, username="john_doe")
+if await crud_users.exists(db=db, email="user@example.com"):
+    raise UserExistsError("Email already registered")
 ```
 
-**Real usage example:**
-
-```python
-# From src/app/api/v1/users.py - checking before creating
-email_row = await crud_users.exists(db=db, email=user.email)
-if email_row:
-    raise DuplicateValueException("Email is already registered")
-```
+`exists()` is faster than `get()` when you only need a yes/no — it doesn't transfer the row.
 
 ### Count Records
 
-Get count of records matching criteria:
-
 ```python
-# Count all users
-total_users = await crud_users.count(db=db)
-
-# Count active users
-active_count = await crud_users.count(db=db, is_deleted=False)
-
-# Count by specific criteria
-admin_count = await crud_users.count(db=db, is_superuser=True)
+total = await crud_users.count(db=db)
+admins = await crud_users.count(db=db, is_superuser=True)
+active = await crud_users.count(db=db, is_deleted=False)
 ```
 
 ## Create Operations
 
-### Basic Creation
-
-Create new records using Pydantic schemas:
-
 ```python
-# Create user
-user_data = UserCreateInternal(
-    username="john_doe",
-    email="john@example.com", 
-    hashed_password="hashed_password_here"
+user_internal = UserCreateInternal(
+    name="User Userson",
+    username="userson",
+    email="user.userson@example.com",
+    hashed_password=get_password_hash("Str1ngst!"),
 )
 
-created_user = await crud_users.create(db=db, object=user_data)
+created = await crud_users.create(db=db, object=user_internal)
 ```
 
-**Real creation example:**
+The pattern in service code:
+
+1. Validate the *external* schema (`UserCreate`) on input
+2. Apply business rules (uniqueness check, password hashing, etc.)
+3. Build the *internal* schema (`UserCreateInternal`) with the values you actually want to persist
+4. Call `crud.create(db=db, object=internal_schema)`
+
+Pass `schema_to_select=UserRead` if you want the returned dict trimmed to the public shape:
 
 ```python
-# From src/app/api/v1/users.py
-user_internal_dict = user.model_dump()
-user_internal_dict["hashed_password"] = get_password_hash(password=user_internal_dict["password"])
-del user_internal_dict["password"]
-
-user_internal = UserCreateInternal(**user_internal_dict)
-created_user = await crud_users.create(db=db, object=user_internal)
+created = await crud_users.create(db=db, object=user_internal, schema_to_select=UserRead)
 ```
 
-### Create with Relationships
+### Creating Records with Foreign Keys
 
-When creating records with foreign keys:
+For models that reference other rows, just include the FK column on the create schema:
 
 ```python
-# Create post for a user
-post_data = PostCreateInternal(
-    title="My First Post",
-    content="This is the content of my post",
-    created_by_user_id=user.id  # Foreign key reference
+new_rate_limit = RateLimitCreate(
+    tier_id=tier.id,
+    name="users_list",
+    path="/api/v1/users/",
+    limit=100,
+    period=60,
 )
-
-created_post = await crud_posts.create(db=db, object=post_data)
+await crud_rate_limits.create(db=db, object=new_rate_limit)
 ```
 
 ## Update Operations
 
-### Basic Updates
-
-Update records by any field:
-
 ```python
-# Update user by ID
-update_data = UserUpdate(email="newemail@example.com")
-await crud_users.update(db=db, object=update_data, id=user_id)
-
-# Update by username
-await crud_users.update(db=db, object=update_data, username="john_doe")
-
-# Update multiple fields
-update_data = UserUpdate(
-    email="newemail@example.com",
-    profile_image_url="https://newimage.com/photo.jpg"
+# Update by id
+await crud_users.update(
+    db=db,
+    object=UserUpdate(email="newemail@example.com"),
+    id=user_id,
 )
-await crud_users.update(db=db, object=update_data, id=user_id)
+
+# Update by any field
+await crud_users.update(db=db, object=UserUpdate(name="New Name"), username=username)
 ```
 
-### Conditional Updates
+Only fields set on the update schema are written — `*Update` schemas have every field as `Optional[T] = None`, and unset fields are skipped.
 
-Update with validation:
+### Common Pattern: Validate Before Update
 
 ```python
-# From real endpoint - check before updating
-if values.username != db_user.username:
-    existing_username = await crud_users.exists(db=db, username=values.username)
-    if existing_username:
-        raise DuplicateValueException("Username not available")
+# Service method
+if values.username and values.username != db_user["username"]:
+    if await crud_users.exists(db=db, username=values.username):
+        raise UserExistsError("Username not available")
 
-await crud_users.update(db=db, object=values, username=username)
+await crud_users.update(db=db, object=values, id=db_user["id"])
 ```
 
-### Bulk Updates
+### Bulk Update
 
-Update multiple records at once:
+`update()` accepts the same lookup args as `get_multi()` — pass non-id criteria to update many rows:
 
 ```python
-# Update all users with specific criteria
-update_data = {"is_active": False}
-await crud_users.update(db=db, object=update_data, is_deleted=True)
+# Reset profile_image_url for everyone in a deprecated tier
+await crud_users.update(
+    db=db,
+    object=UserUpdate(profile_image_url="https://www.profileimageurl.com"),
+    tier_id=deprecated_tier_id,
+)
 ```
 
 ## Delete Operations
 
-### Soft Delete
-
-For models with soft delete fields (like User, Post):
+### Soft Delete (default for models with `SoftDeleteMixin`)
 
 ```python
-# Soft delete - sets is_deleted=True, deleted_at=now()
-await crud_users.delete(db=db, username="john_doe")
+# Sets is_deleted=True and deleted_at=now()
+await crud_users.delete(db=db, id=user_id)
 
-# The record stays in the database but is marked as deleted
-user = await crud_users.get(db=db, username="john_doe", is_deleted=True)
+# The row stays — query it explicitly
+soft_deleted = await crud_users.get(db=db, id=user_id, is_deleted=True)
 ```
 
 ### Hard Delete
 
-Permanently remove records from the database:
-
 ```python
-# Permanently delete from database
-await crud_users.db_delete(db=db, username="john_doe")
-
-# The record is completely removed
+# DELETE FROM user WHERE id = ?
+await crud_users.db_delete(db=db, id=user_id)
 ```
 
-**Real deletion example:**
+### Filtering Out Soft-Deleted Records
+
+Add `is_deleted=False` to your queries:
 
 ```python
-# From src/app/api/v1/users.py
-# Regular users get soft delete
-await crud_users.delete(db=db, username=username)
-
-# Superusers can hard delete
-await crud_users.db_delete(db=db, username=username)
+active_users = await crud_users.get_multi(db=db, is_deleted=False, limit=10)
 ```
 
-## Advanced Operations
+## Joined Queries
 
-### Joined Queries
+For models with relationships (e.g. `User.tier`), the relationship loads automatically via `lazy="selectin"`.
 
-Get data from multiple related tables:
+For ad-hoc joins without a configured relationship, use `get_joined` / `get_multi_joined`:
 
 ```python
-# Get posts with user information
-posts_with_users = await crud_posts.get_multi_joined(
+posts_with_authors = await crud_posts.get_multi_joined(
     db=db,
     join_model=User,
     join_on=Post.created_by_user_id == User.id,
     schema_to_select=PostRead,
     join_schema_to_select=UserRead,
-    join_prefix="user_"
+    join_prefix="author_",
+    offset=0,
+    limit=10,
 )
+# Each row: {..., "author_username": ..., "author_email": ...}
 ```
 
-Result structure:
+The boilerplate also uses **`JoinConfig`** for more complex multi-join queries (see `UserService.get_rate_limits` for a real example with two joins).
+
+## Pagination
+
+The boilerplate uses FastCRUD's `paginated_response()` helper to turn a `get_multi` result into a public-shaped paginated response:
+
 ```python
+from fastcrud import PaginatedListResponse, compute_offset, paginated_response
+
+@router.get("/", response_model=PaginatedListResponse[UserRead])
+async def list_users(
+    db: Annotated[AsyncSession, Depends(async_session)],
+    user_service: Annotated[UserService, Depends(get_user_service)],
+    page: int = 1,
+    items_per_page: int = 10,
+) -> dict[str, Any]:
+    result = await user_service.get_paginated(
+        skip=compute_offset(page, items_per_page),
+        limit=items_per_page,
+        db=db,
+    )
+    return paginated_response(crud_data=result, page=page, items_per_page=items_per_page)
+```
+
+Response shape:
+
+```json
 {
-    "id": 1,
-    "title": "My Post",
-    "content": "Post content",
-    "user_id": 123,
-    "user_username": "john_doe",
-    "user_email": "john@example.com"
+  "data": [{ "id": 1, "name": "...", "username": "..." }],
+  "total_count": 150,
+  "has_more": true,
+  "page": 1,
+  "items_per_page": 10
 }
 ```
 
-### Custom Filtering
+## Selective Field Loading
 
-Advanced filtering with SQLAlchemy expressions:
+`schema_to_select` lets the database return only the columns the caller cares about. The result is a plain dict matching the schema fields:
 
 ```python
-from sqlalchemy import and_, or_
-
-# Complex filters
-users = await crud_users.get_multi(
+# Returns just id, name, username, email, profile_image_url, ...
+result = await crud_users.get_multi(
     db=db,
-    filter_criteria=[
-        and_(
-            User.is_deleted == False,
-            User.created_at > datetime(2024, 1, 1)
-        )
-    ]
+    schema_to_select=UserRead,
+    is_deleted=False,
+    limit=100,
 )
 ```
 
-### Optimized Field Selection
+Use this when you want to avoid fetching `hashed_password` or other heavy fields you won't use.
 
-Select only needed fields for better performance:
-
-```python
-# Only select id and username
-users = await crud_users.get_multi(
-    db=db,
-    schema_to_select=UserRead,  # Use schema to define fields
-    limit=100
-)
-
-# Or specify fields directly
-users = await crud_users.get_multi(
-    db=db,
-    schema_to_select=["id", "username", "email"],
-    limit=100
-)
-```
-
-## Practical Examples
-
-### Complete CRUD Workflow
-
-Here's a complete example showing all CRUD operations:
+## Complete Workflow Example
 
 ```python
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.crud.crud_users import crud_users
-from app.schemas.user import UserCreateInternal, UserUpdate, UserRead
 
-async def user_management_example(db: AsyncSession):
+from src.modules.user.crud import crud_users
+from src.modules.user.schemas import (
+    UserCreateInternal,
+    UserRead,
+    UserUpdate,
+)
+from src.infrastructure.auth.utils import get_password_hash
+
+
+async def user_lifecycle(db: AsyncSession) -> None:
     # 1. CREATE
-    user_data = UserCreateInternal(
-        username="demo_user",
-        email="demo@example.com",
-        hashed_password="hashed_password"
-    )
-    new_user = await crud_users.create(db=db, object=user_data)
-    print(f"Created user: {new_user.id}")
-    
-    # 2. READ
-    user = await crud_users.get(
-        db=db, 
-        id=new_user.id, 
-        schema_to_select=UserRead
-    )
-    print(f"Retrieved user: {user.username}")
-    
-    # 3. UPDATE  
-    update_data = UserUpdate(email="updated@example.com")
-    await crud_users.update(db=db, object=update_data, id=new_user.id)
-    print("User updated")
-    
-    # 4. DELETE (soft delete)
-    await crud_users.delete(db=db, id=new_user.id)
-    print("User soft deleted")
-    
-    # 5. VERIFY DELETION
-    deleted_user = await crud_users.get(db=db, id=new_user.id, is_deleted=True)
-    print(f"User deleted at: {deleted_user.deleted_at}")
-```
-
-### Pagination Helper
-
-Using FastCRUD's pagination utilities:
-
-```python
-from fastcrud import compute_offset, paginated_response
-
-
-async def get_paginated_users(
-    db: AsyncSession, 
-    page: int = 1, 
-    items_per_page: int = 10
-):
-    users_data = await crud_users.get_multi(
+    new_user = await crud_users.create(
         db=db,
-        offset=compute_offset(page, items_per_page),
-        limit=items_per_page,
-        is_deleted=False,
-        schema_to_select=UserRead
+        object=UserCreateInternal(
+            name="Demo User",
+            username="demo_user",
+            email="demo@example.com",
+            hashed_password=get_password_hash("Str1ngst!"),
+        ),
+        schema_to_select=UserRead,
     )
-    
-    return paginated_response(
-        crud_data=users_data, 
-        page=page, 
-        items_per_page=items_per_page
+
+    # 2. READ
+    fetched = await crud_users.get(
+        db=db,
+        id=new_user["id"],
+        schema_to_select=UserRead,
     )
+
+    # 3. UPDATE
+    await crud_users.update(
+        db=db,
+        object=UserUpdate(name="Demo Userson"),
+        id=fetched["id"],
+    )
+
+    # 4. SOFT DELETE
+    await crud_users.delete(db=db, id=fetched["id"])
+
+    # 5. FETCH SOFT-DELETED
+    soft_deleted = await crud_users.get(db=db, id=fetched["id"], is_deleted=True)
+    assert soft_deleted["deleted_at"] is not None
 ```
 
-### Error Handling
+## Error Handling
 
-Proper error handling with CRUD operations:
+Domain errors live in `modules/common/exceptions.py` (`UserExistsError`, `UserNotFoundError`, `ResourceNotFoundError`, `PermissionDeniedError`, etc.). Routes catch them and translate to HTTP errors via `modules/common/utils/error_handler.handle_exception`.
 
 ```python
-from app.core.exceptions.http_exceptions import NotFoundException, DuplicateValueException
+async def create(self, user: UserCreate, db: AsyncSession) -> dict[str, Any]:
+    if await crud_users.exists(db=db, email=user.email):
+        raise UserExistsError("Email already registered")
+    # ... create user ...
+```
 
-async def safe_user_creation(db: AsyncSession, user_data: UserCreate):
-    # Check for duplicates
-    if await crud_users.exists(db=db, email=user_data.email):
-        raise DuplicateValueException("Email already registered")
-    
-    if await crud_users.exists(db=db, username=user_data.username):
-        raise DuplicateValueException("Username not available")
-    
-    # Create user
-    try:
-        user_internal = UserCreateInternal(**user_data.model_dump())
-        created_user = await crud_users.create(db=db, object=user_internal)
-        return created_user
-    except Exception as e:
-        # Handle database errors
-        await db.rollback()
-        raise e
+The route then:
+
+```python
+try:
+    return await user_service.create(user, db)
+except Exception as e:
+    http_exc = handle_exception(e)
+    if http_exc:
+        raise http_exc
+    raise HTTPException(status_code=500, detail="An unexpected error occurred")
 ```
 
 ## Performance Tips
 
-### 1. Use Schema Selection
+### Use `schema_to_select`
 
-Always specify `schema_to_select` to avoid loading unnecessary data:
+Avoid loading columns you won't read:
 
 ```python
-# Good - only loads needed fields
+# Good — only the public fields
 user = await crud_users.get(db=db, id=user_id, schema_to_select=UserRead)
 
-# Avoid - loads all fields
+# Avoid — pulls the password hash too
 user = await crud_users.get(db=db, id=user_id)
 ```
 
-### 2. Batch Operations
-
-For multiple operations, use transactions:
+### Use `exists()` for existence checks
 
 ```python
-async def batch_user_updates(db: AsyncSession, updates: List[dict]):
-    try:
-        for update in updates:
-            await crud_users.update(db=db, object=update["data"], id=update["id"])
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        raise
-```
-
-### 3. Use Exists for Checks
-
-Use `exists()` instead of `get()` when you only need to check existence:
-
-```python
-# Good - faster, doesn't load data
+# Good — boolean, no row transfer
 if await crud_users.exists(db=db, email=email):
-    raise DuplicateValueException("Email taken")
+    raise UserExistsError("Email taken")
 
-# Avoid - slower, loads unnecessary data
+# Avoid — fetches the entire row to check None
 user = await crud_users.get(db=db, email=email)
 if user:
-    raise DuplicateValueException("Email taken")
+    raise UserExistsError("Email taken")
 ```
+
+### Use `count()` for counts
+
+```python
+# Good
+total = await crud_users.count(db=db, is_deleted=False)
+
+# Avoid
+result = await crud_users.get_multi(db=db, is_deleted=False, limit=10000)
+total = result["total_count"]  # works, but transfers data
+```
+
+### Pre-fetch related data in services
+
+If a route calls `crud_users.get` then `crud_tiers.get(tier_id)` separately, prefer using the existing `User.tier` relationship (auto-loaded with `selectin`) or a `get_joined` call, so the database only round-trips once.
 
 ## Next Steps
 
-- **[Database Migrations](migrations.md)** - Managing database schema changes
-- **[API Development](../api/index.md)** - Using CRUD in API endpoints
-- **[Caching](../caching/index.md)** - Optimizing CRUD with caching 
+- **[Migrations](migrations.md)** — Manage schema changes with Alembic
+- **[API Endpoints](../api/endpoints.md)** — Wire CRUD into FastAPI routes
+- **[Caching](../caching/index.md)** — Cache CRUD results
