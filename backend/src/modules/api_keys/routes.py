@@ -2,32 +2,24 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, HTTPException, Path, Query, status
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...infrastructure.auth.session.dependencies import get_current_user
-from ...infrastructure.database.session import async_session
+from ...infrastructure.dependencies import AsyncSessionDep, CurrentUserDep
 from ..common.exceptions import (
     PermissionDeniedError,
     ResourceNotFoundError,
 )
 from ..common.utils.error_handler import handle_exception
-from ..user.models import User
+from .dependencies import APIKeyServiceDep
 from .schemas import (
     APIKeyCreate,
     APIKeyRead,
     APIKeyUpdate,
     KeyUsageRead,
 )
-from .service import APIKeyService
 
 router = APIRouter(tags=["API Keys"])
-
-
-def get_api_key_service() -> APIKeyService:
-    """Dependency for providing an APIKeyService instance."""
-    return APIKeyService()
 
 
 @router.post(
@@ -57,9 +49,9 @@ def get_api_key_service() -> APIKeyService:
 )
 async def create_api_key(
     key_data: APIKeyCreate,
-    current_user: User = Depends(get_current_user),
-    api_key_service: APIKeyService = Depends(get_api_key_service),
-    db: AsyncSession = Depends(async_session),
+    current_user: CurrentUserDep,
+    api_key_service: APIKeyServiceDep,
+    db: AsyncSessionDep,
 ) -> dict[str, Any]:
     """Create a new API key for the authenticated user."""
     try:
@@ -96,9 +88,9 @@ async def create_api_key(
     response_description="Paginated list of user's API keys",
 )
 async def get_user_api_keys(
-    current_user: User = Depends(get_current_user),
-    api_key_service: APIKeyService = Depends(get_api_key_service),
-    db: AsyncSession = Depends(async_session),
+    current_user: CurrentUserDep,
+    api_key_service: APIKeyServiceDep,
+    db: AsyncSessionDep,
     active_only: bool = Query(True, description="Return only active keys"),
     page: int = Query(1, ge=1, description="Page number"),
     items_per_page: int = Query(50, ge=1, le=100, description="Items per page"),
@@ -145,10 +137,10 @@ async def get_user_api_keys(
     response_description="API key details",
 )
 async def get_api_key(
+    current_user: CurrentUserDep,
+    api_key_service: APIKeyServiceDep,
+    db: AsyncSessionDep,
     key_id: int = Path(..., description="API key ID"),
-    current_user: User = Depends(get_current_user),
-    api_key_service: APIKeyService = Depends(get_api_key_service),
-    db: AsyncSession = Depends(async_session),
 ) -> dict[str, Any]:
     """Get details for a specific API key."""
     try:
@@ -190,10 +182,10 @@ async def get_api_key(
 )
 async def update_api_key(
     update_data: APIKeyUpdate,
+    current_user: CurrentUserDep,
+    api_key_service: APIKeyServiceDep,
+    db: AsyncSessionDep,
     key_id: int = Path(..., description="API key ID"),
-    current_user: User = Depends(get_current_user),
-    api_key_service: APIKeyService = Depends(get_api_key_service),
-    db: AsyncSession = Depends(async_session),
 ) -> dict[str, Any]:
     """Update an existing API key."""
     try:
@@ -236,10 +228,10 @@ async def update_api_key(
     },
 )
 async def delete_api_key(
+    current_user: CurrentUserDep,
+    api_key_service: APIKeyServiceDep,
+    db: AsyncSessionDep,
     key_id: int = Path(..., description="API key ID"),
-    current_user: User = Depends(get_current_user),
-    api_key_service: APIKeyService = Depends(get_api_key_service),
-    db: AsyncSession = Depends(async_session),
 ) -> None:
     """Delete (deactivate) an API key."""
     try:
@@ -282,10 +274,10 @@ async def delete_api_key(
     response_description="Paginated list of usage records",
 )
 async def get_key_usage(
+    current_user: CurrentUserDep,
+    api_key_service: APIKeyServiceDep,
+    db: AsyncSessionDep,
     key_id: int = Path(..., description="API key ID"),
-    current_user: User = Depends(get_current_user),
-    api_key_service: APIKeyService = Depends(get_api_key_service),
-    db: AsyncSession = Depends(async_session),
     page: int = Query(1, ge=1, description="Page number"),
     items_per_page: int = Query(100, ge=1, le=1000, description="Items per page"),
 ) -> dict[str, Any]:
@@ -340,10 +332,10 @@ async def get_key_usage(
     response_description="Usage analytics for the API key",
 )
 async def get_key_analytics(
+    current_user: CurrentUserDep,
+    api_key_service: APIKeyServiceDep,
+    db: AsyncSessionDep,
     key_id: int = Path(..., description="API key ID"),
-    current_user: User = Depends(get_current_user),
-    api_key_service: APIKeyService = Depends(get_api_key_service),
-    db: AsyncSession = Depends(async_session),
     days: int = Query(30, ge=1, le=365, description="Number of days to analyze"),
 ) -> dict[str, Any]:
     """Get usage analytics for an API key."""
@@ -386,9 +378,9 @@ async def get_key_analytics(
     response_description="Comprehensive API key summary for the user",
 )
 async def get_user_summary(
-    current_user: User = Depends(get_current_user),
-    api_key_service: APIKeyService = Depends(get_api_key_service),
-    db: AsyncSession = Depends(async_session),
+    current_user: CurrentUserDep,
+    api_key_service: APIKeyServiceDep,
+    db: AsyncSessionDep,
 ) -> dict[str, Any]:
     """Get comprehensive API key summary for the authenticated user."""
     try:
