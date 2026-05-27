@@ -1,25 +1,26 @@
 import inspect
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
-from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...modules.user.crud import crud_users
 from ...modules.user.enums import OAuthProvider
 from ..config.settings import get_settings
-from ..database.session import async_session
 from ..logging import get_logger
+from ..dependencies import (
+    AsyncSessionDep,
+    CurrentSessionDataDep,
+    GoogleOAuthProviderDep,
+    OAuth2FormDep,
+    OAuthStateStorageDep,
+    SessionManagerDep,
+)
 from .http_exceptions import UnauthorizedException
-from .oauth.dependencies import get_google_provider, get_oauth_state, get_oauth_state_storage
-from .oauth.provider import AbstractOAuthProvider
+from .oauth.dependencies import get_oauth_state
 from .oauth.schemas import OAuthState, OAuthToken
 from .oauth.services import oauth_account_service
-from .session.dependencies import authenticate_user, get_current_session_data, get_session_manager
-from .session.manager import SessionManager
-from .session.schemas import SessionData
-from .session.storage import AbstractSessionStorage
+from .session.dependencies import authenticate_user
 
 settings = get_settings()
 logger = get_logger()
@@ -52,9 +53,9 @@ router = APIRouter(tags=["Authentication"])
 async def login(
     request: Request,
     response: Response,
-    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
-    db: Annotated[AsyncSession, Depends(async_session)],
-    session_manager: Annotated[SessionManager, Depends(get_session_manager)],
+    form_data: OAuth2FormDep,
+    db: AsyncSessionDep,
+    session_manager: SessionManagerDep,
 ) -> dict[str, str]:
     """Login endpoint to get session cookies.
 
@@ -124,8 +125,8 @@ async def login(
 async def logout(
     request: Request,
     response: Response,
-    session_data: Annotated[SessionData, Depends(get_current_session_data)],
-    session_manager: Annotated[SessionManager, Depends(get_session_manager)],
+    session_data: CurrentSessionDataDep,
+    session_manager: SessionManagerDep,
 ) -> dict[str, str]:
     """Logout endpoint to terminate the session and clear cookies."""
     await session_manager.terminate_session(session_data.session_id)
@@ -153,8 +154,8 @@ async def logout(
 async def refresh_csrf_token(
     request: Request,
     response: Response,
-    session_data: Annotated[SessionData, Depends(get_current_session_data)],
-    session_manager: Annotated[SessionManager, Depends(get_session_manager)],
+    session_data: CurrentSessionDataDep,
+    session_manager: SessionManagerDep,
 ) -> dict[str, str]:
     """Generate a new CSRF token for the current session."""
     csrf_token = await session_manager.regenerate_csrf_token(
@@ -201,9 +202,9 @@ async def refresh_csrf_token(
 )
 async def oauth_google_login(
     request: Request,
+    oauth_provider: GoogleOAuthProviderDep,
+    state_storage: OAuthStateStorageDep,
     redirect_uri: str | None = Query(None),
-    oauth_provider: AbstractOAuthProvider = Depends(get_google_provider),
-    state_storage: AbstractSessionStorage[OAuthState] = Depends(get_oauth_state_storage),
 ) -> dict[str, str]:
     """
     Initiate OAuth login flow for Google.
@@ -298,13 +299,13 @@ def _is_provider_valid(provider_value: Any, expected_provider: str) -> bool:
 async def oauth_google_callback(
     request: Request,
     response: Response,
+    oauth_provider: GoogleOAuthProviderDep,
+    state_storage: OAuthStateStorageDep,
+    db: AsyncSessionDep,
+    session_manager: SessionManagerDep,
     code: str = Query(...),
     state: str = Query(...),
     response_format: str = Query("redirect", description="Response format, either 'redirect' or 'json'"),
-    oauth_provider: AbstractOAuthProvider = Depends(get_google_provider),
-    state_storage: AbstractSessionStorage[OAuthState] = Depends(get_oauth_state_storage),
-    db: AsyncSession = Depends(async_session),
-    session_manager: SessionManager = Depends(get_session_manager),
 ):
     """
     Handle OAuth callback from Google.
@@ -421,8 +422,8 @@ async def oauth_google_callback(
 
 @router.get("/check-auth")
 async def check_auth(
-    session_data: Annotated[SessionData | None, Depends(get_current_session_data)],
-    db: AsyncSession = Depends(async_session),
+    session_data: CurrentSessionDataDep,
+    db: AsyncSessionDep,
 ) -> dict[str, Any]:
     """
     Check if the user is authenticated and return basic user information.
