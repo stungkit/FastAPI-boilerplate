@@ -7,7 +7,6 @@ from fastapi.responses import RedirectResponse
 from ...modules.user.crud import crud_users
 from ...modules.user.enums import OAuthProvider
 from ..config.settings import get_settings
-from ..logging import get_logger
 from ..dependencies import (
     AsyncSessionDep,
     CurrentSessionDataDep,
@@ -16,6 +15,7 @@ from ..dependencies import (
     OAuthStateStorageDep,
     SessionManagerDep,
 )
+from ..logging import get_logger
 from .http_exceptions import UnauthorizedException
 from .oauth.dependencies import get_oauth_state
 from .oauth.schemas import OAuthState, OAuthToken
