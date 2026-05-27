@@ -2,6 +2,64 @@
 
 This guide shows the patterns the boilerplate uses for endpoints, so adding new ones stays consistent with the existing modules.
 
+## Dependency Injection
+
+This boilerplate supports two equivalent ways to inject FastAPI dependencies — you'll see both in the codebase, and either is correct.
+
+### Traditional style (explicit `Depends()`)
+
+```python
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ...infrastructure.database.session import async_session
+
+
+@router.get("/items")
+async def list_items(
+    db: AsyncSession = Depends(async_session),
+) -> list[dict[str, Any]]:
+    ...
+```
+
+### Modern style (Annotated type aliases)
+
+```python
+from ...infrastructure.dependencies import AsyncSessionDep
+
+
+@router.get("/items")
+async def list_items(
+    db: AsyncSessionDep,
+) -> list[dict[str, Any]]:
+    ...
+```
+
+The boilerplate pre-defines aliases for every shared dependency in `infrastructure/dependencies.py`:
+
+| Alias | Resolves to |
+|---|---|
+| `AsyncSessionDep` | `Annotated[AsyncSession, Depends(async_session)]` |
+| `CurrentUserDep` | `Annotated[dict[str, Any], Depends(get_current_user)]` |
+| `CurrentSuperUserDep` | `Annotated[dict[str, Any], Depends(get_current_superuser)]` |
+| `OptionalUserDep` | `Annotated[dict[str, Any] \| None, Depends(get_optional_user)]` |
+| `SessionManagerDep` | `Annotated[SessionManager, Depends(get_session_manager)]` |
+| `CurrentSessionDataDep` | `Annotated[SessionData, Depends(get_current_session_data)]` |
+| `OAuth2FormDep` | `Annotated[OAuth2PasswordRequestForm, Depends()]` |
+| `GoogleOAuthProviderDep` | `Annotated[AbstractOAuthProvider, Depends(get_google_provider)]` |
+| `OAuthStateStorageDep` | `Annotated[AbstractSessionStorage[OAuthState], Depends(get_oauth_state_storage)]` |
+
+Per-module service aliases live in `modules/<name>/dependencies.py`:
+
+| File | Alias |
+|---|---|
+| `modules/user/dependencies.py` | `UserServiceDep` |
+| `modules/tier/dependencies.py` | `TierServiceDep` |
+| `modules/rate_limit/dependencies.py` | `RateLimitServiceDep` |
+| `modules/api_keys/dependencies.py` | `APIKeyServiceDep` |
+
+Both styles produce the same runtime behavior. The alias form reduces repetition and makes route signatures easier to scan.
+
 ## Quick Start
 
 A typical endpoint lives in `modules/<feature>/routes.py` and delegates work to a service:
