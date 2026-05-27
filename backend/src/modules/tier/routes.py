@@ -1,28 +1,22 @@
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...infrastructure.auth.http_exceptions import NotFoundException
-from ...infrastructure.database.session import async_session
+from ...infrastructure.dependencies import AsyncSessionDep
 from ..common.exceptions import TierNotFoundError
 from ..common.utils.error_handler import handle_exception
+from .dependencies import TierServiceDep
 from .schemas import TierRead
-from .service import TierService
 
 router = APIRouter(tags=["Tiers"])
 
 
-def get_tier_service() -> TierService:
-    """Dependency for providing a TierService instance."""
-    return TierService()
-
-
 @router.get("/", response_model=PaginatedListResponse[TierRead], summary="List tiers")
 async def get_tiers(
-    db: Annotated[AsyncSession, Depends(async_session)],
-    tier_service: Annotated[TierService, Depends(get_tier_service)],
+    db: AsyncSessionDep,
+    tier_service: TierServiceDep,
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict:
@@ -44,8 +38,8 @@ async def get_tiers(
 @router.get("/{name}", response_model=TierRead, summary="Get a tier by name")
 async def get_tier_by_name(
     name: str,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    tier_service: Annotated[TierService, Depends(get_tier_service)],
+    db: AsyncSessionDep,
+    tier_service: TierServiceDep,
 ) -> dict[str, Any]:
     """Get a tier by name."""
     try:

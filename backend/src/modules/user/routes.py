@@ -1,30 +1,24 @@
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...infrastructure.auth.http_exceptions import HTTPException
-from ...infrastructure.auth.session.dependencies import (
-    get_current_superuser,
-    get_current_user,
+from ...infrastructure.dependencies import (
+    AsyncSessionDep,
+    CurrentSuperUserDep,
+    CurrentUserDep,
 )
-from ...infrastructure.database.session import async_session
 from ..common.utils.error_handler import handle_exception
+from .dependencies import UserServiceDep
 from .schemas import (
     UserCreate,
     UserRead,
     UserTierUpdate,
     UserUpdate,
 )
-from .service import UserService
 
 router = APIRouter(tags=["Users"])
-
-
-def get_user_service() -> UserService:
-    """Dependency for providing a UserService instance."""
-    return UserService()
 
 
 @router.post(
@@ -52,8 +46,8 @@ def get_user_service() -> UserService:
 )
 async def create_user(
     user: UserCreate,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
+    db: AsyncSessionDep,
+    user_service: UserServiceDep,
 ) -> dict[str, Any]:
     """Create a new user account."""
     try:
@@ -83,9 +77,9 @@ async def create_user(
     response_description="A paginated list of users with total count and pagination metadata",
 )
 async def get_users(
-    db: Annotated[AsyncSession, Depends(async_session)],
-    _: Annotated[dict[str, Any], Depends(get_current_superuser)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
+    db: AsyncSessionDep,
+    _: CurrentSuperUserDep,
+    user_service: UserServiceDep,
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict[str, Any]:
@@ -115,7 +109,7 @@ async def get_users(
     response_description="The current user's profile data",
 )
 async def get_current_user_profile(
-    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+    current_user: CurrentUserDep,
 ) -> dict[str, Any]:
     """Get current authenticated user's profile."""
     return current_user
@@ -139,8 +133,8 @@ async def get_current_user_profile(
 )
 async def get_user_by_username(
     username: str,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
+    db: AsyncSessionDep,
+    user_service: UserServiceDep,
 ) -> dict[str, Any]:
     """Get user profile by username."""
     try:
@@ -177,9 +171,9 @@ async def get_user_by_username(
 )
 async def get_active_and_inactive_user_by_username(
     username: str,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    _: Annotated[dict[str, Any], Depends(get_current_superuser)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
+    db: AsyncSessionDep,
+    _: CurrentSuperUserDep,
+    user_service: UserServiceDep,
 ) -> dict[str, Any]:
     """Get active and inactive profile by username."""
     try:
@@ -223,9 +217,9 @@ async def get_active_and_inactive_user_by_username(
 async def update_user_profile(
     username: str,
     values: UserUpdate,
-    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_session)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
+    current_user: CurrentUserDep,
+    db: AsyncSessionDep,
+    user_service: UserServiceDep,
 ) -> dict[str, str]:
     """Update user profile information."""
     try:
@@ -269,9 +263,9 @@ async def update_user_profile(
 )
 async def delete_user_account(
     username: str,
-    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(async_session)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
+    current_user: CurrentUserDep,
+    db: AsyncSessionDep,
+    user_service: UserServiceDep,
 ) -> dict[str, str]:
     """Soft delete a user account."""
     try:
@@ -326,9 +320,9 @@ async def delete_user_account(
 )
 async def gdpr_delete_user(
     username: str,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
-    _: Annotated[dict[str, Any], Depends(get_current_superuser)],
+    db: AsyncSessionDep,
+    user_service: UserServiceDep,
+    _: CurrentSuperUserDep,
 ) -> dict[str, str]:
     """GDPR compliant user anonymization (admin only)."""
     try:
@@ -370,9 +364,9 @@ async def gdpr_delete_user(
 )
 async def get_user_rate_limits(
     username: str,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
+    db: AsyncSessionDep,
+    current_user: CurrentUserDep,
+    user_service: UserServiceDep,
 ) -> dict[str, Any]:
     """Get rate limits for a user."""
     try:
@@ -414,9 +408,9 @@ async def get_user_rate_limits(
 )
 async def get_user_tier(
     username: str,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
+    db: AsyncSessionDep,
+    current_user: CurrentUserDep,
+    user_service: UserServiceDep,
 ) -> dict[str, Any]:
     """Get detailed tier information for a user."""
     try:
@@ -459,9 +453,9 @@ async def get_user_tier(
 async def update_user_tier(
     username: str,
     values: UserTierUpdate,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    user_service: Annotated[UserService, Depends(get_user_service)],
-    _: Annotated[dict[str, Any], Depends(get_current_superuser)],
+    db: AsyncSessionDep,
+    user_service: UserServiceDep,
+    _: CurrentSuperUserDep,
 ) -> dict[str, str]:
     """Update a user's subscription tier (admin only)."""
     try:
