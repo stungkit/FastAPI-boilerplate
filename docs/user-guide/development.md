@@ -161,17 +161,19 @@ Order matters — middleware added later runs **earlier** in the request path. T
 
 Dependencies belong with the feature they serve. For session-aware dependencies, look at `infrastructure/auth/session/dependencies.py:get_current_user` for a template.
 
+### Define the factory
+
 ```python
-from typing import Annotated
+# modules/workspace/dependencies.py
+from fastapi import Request
 
-from fastapi import Depends, Request
-
-from src.infrastructure.auth.session.dependencies import get_current_user
+from ...infrastructure.auth.session.dependencies import get_current_user
+from ...infrastructure.dependencies import CurrentUserDep
 
 
 def get_workspace(
     request: Request,
-    current_user: Annotated[dict, Depends(get_current_user)],
+    current_user: CurrentUserDep,
 ) -> str:
     workspace = request.headers.get("X-Workspace")
     if not workspace:
@@ -180,7 +182,36 @@ def get_workspace(
     return workspace
 ```
 
-Use it as `Depends(get_workspace)` on a route, or in another dependency for chaining.
+### Register the alias (optional)
+
+Add it to the module's `dependencies.py` so routes can use it without typing `Depends(get_workspace)` every time:
+
+```python
+# modules/workspace/dependencies.py (extended)
+from typing import Annotated
+
+from fastapi import Depends
+
+from ...infrastructure.dependencies import CurrentUserDep
+
+WorkspaceDep = Annotated[str, Depends(get_workspace)]
+```
+
+### Use it
+
+```python
+from ..dependencies import WorkspaceDep
+
+
+@router.get("/workspace/items")
+async def list_workspace_items(
+    workspace: WorkspaceDep,
+    db: AsyncSessionDep,
+) -> list[dict[str, Any]]:
+    ...
+```
+
+Per-module service aliases follow the same pattern — see the existing `modules/{user,tier,rate_limit,api_keys}/dependencies.py` files for real examples.
 
 ## Debugging Tips
 

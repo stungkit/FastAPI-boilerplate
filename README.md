@@ -33,6 +33,7 @@
 * ⚡️ Fully async FastAPI + SQLAlchemy 2.0
 * 🧱 Pydantic v2 models & validation
 * 🔐 Server-side sessions + CSRF; OAuth (Google wired, GitHub scaffolded); API keys
+* 🏷️ Annotated type aliases for all FastAPI dependencies
 * 👮 Rate limiter with per-tier, per-path rules
 * 🧰 FastCRUD for efficient CRUD & pagination
 * 🧑‍💼 **SQLAdmin**-based admin panel (optional, env-toggled)

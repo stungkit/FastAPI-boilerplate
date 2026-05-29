@@ -1,26 +1,19 @@
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from fastcrud import PaginatedListResponse, compute_offset, paginated_response
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...infrastructure.auth.http_exceptions import DuplicateValueException, HTTPException, NotFoundException
-from ...infrastructure.auth.session.dependencies import get_current_superuser
-from ...infrastructure.database.session import async_session
+from ...infrastructure.dependencies import AsyncSessionDep, CurrentSuperUserDep
 from ..common.exceptions import ResourceExistsError, ResourceNotFoundError
 from ..common.utils.error_handler import handle_exception
+from .dependencies import RateLimitServiceDep
 from .schemas import (
     RateLimitRead,
     RateLimitUpdate,
 )
-from .service import RateLimitService
 
 router = APIRouter(tags=["Rate Limits"])
-
-
-def get_rate_limit_service() -> RateLimitService:
-    """Dependency for providing a RateLimitService instance."""
-    return RateLimitService()
 
 
 @router.get(
@@ -43,8 +36,8 @@ def get_rate_limit_service() -> RateLimitService:
     response_description="A paginated list of rate limits with their configuration details",
 )
 async def get_rate_limits(
-    db: Annotated[AsyncSession, Depends(async_session)],
-    rate_limit_service: Annotated[RateLimitService, Depends(get_rate_limit_service)],
+    db: AsyncSessionDep,
+    rate_limit_service: RateLimitServiceDep,
     page: int = 1,
     items_per_page: int = 10,
 ) -> dict[str, Any]:
@@ -88,8 +81,8 @@ async def get_rate_limits(
 )
 async def get_rate_limit(
     name: str,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    rate_limit_service: Annotated[RateLimitService, Depends(get_rate_limit_service)],
+    db: AsyncSessionDep,
+    rate_limit_service: RateLimitServiceDep,
 ) -> dict[str, Any] | None:
     """
     Get detailed information about a specific rate limit by name.
@@ -138,9 +131,9 @@ async def get_rate_limit(
 async def update_rate_limit(
     name: str,
     values: RateLimitUpdate,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    rate_limit_service: Annotated[RateLimitService, Depends(get_rate_limit_service)],
-    _: Annotated[dict[str, Any], Depends(get_current_superuser)],
+    db: AsyncSessionDep,
+    rate_limit_service: RateLimitServiceDep,
+    _: CurrentSuperUserDep,
 ) -> dict[str, str]:
     """
     Update an existing rate limit.
@@ -187,9 +180,9 @@ async def update_rate_limit(
 )
 async def delete_rate_limit(
     name: str,
-    db: Annotated[AsyncSession, Depends(async_session)],
-    rate_limit_service: Annotated[RateLimitService, Depends(get_rate_limit_service)],
-    _: Annotated[dict[str, Any], Depends(get_current_superuser)],
+    db: AsyncSessionDep,
+    rate_limit_service: RateLimitServiceDep,
+    _: CurrentSuperUserDep,
 ) -> dict[str, str]:
     """
     Delete a rate limit.

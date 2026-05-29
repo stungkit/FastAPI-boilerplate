@@ -15,7 +15,7 @@ from src.infrastructure.auth.oauth.dependencies import (
 )
 from src.infrastructure.auth.oauth.provider import AbstractOAuthProvider
 from src.infrastructure.auth.oauth.schemas import OAuthState
-from src.infrastructure.auth.session.dependencies import get_current_session_data, get_session_manager
+from src.infrastructure.auth.session.dependencies import get_session_from_cookie, get_session_manager
 from src.infrastructure.auth.session.manager import SessionManager
 from src.infrastructure.auth.session.storage import AbstractSessionStorage
 from src.infrastructure.database.session import async_session
@@ -170,7 +170,7 @@ async def test_check_auth_authenticated(client: AsyncClient, db_session: AsyncSe
     original_deps = app.dependency_overrides.copy()
 
     try:
-        app.dependency_overrides[get_current_session_data] = lambda: mock_session
+        app.dependency_overrides[get_session_from_cookie] = lambda: mock_session
         app.dependency_overrides[async_session] = lambda: db_session
 
         with patch("src.modules.user.crud.crud_users.get", return_value=mock_user):
@@ -192,12 +192,34 @@ async def test_check_auth_not_authenticated(client: AsyncClient):
     original_deps = app.dependency_overrides.copy()
 
     try:
-        app.dependency_overrides[get_current_session_data] = lambda: None
+        app.dependency_overrides[get_session_from_cookie] = lambda: None
 
         response = await client.get("/api/v1/auth/check-auth")
 
         assert response.status_code == 200
         assert response.json()["authenticated"] is False
         assert response.json()["message"] == "Not authenticated"
+    finally:
+        app.dependency_overrides = original_deps
+
+
+@pytest.mark.asyncio
+async def test_check_auth_no_session_cookie_returns_unauthenticated(client: AsyncClient):
+    """A request with no session cookie must get 200 {authenticated: false}, not a 401.
+
+    Regression: /check-auth must answer anonymous callers (its whole purpose). It used to
+    depend on get_current_session_data, which raises 401 when no session exists, so the
+    unauthenticated branch was unreachable. Only get_session_manager is overridden here so
+    the real get_session_from_cookie runs against a request that carries no cookie.
+    """
+    original_deps = app.dependency_overrides.copy()
+
+    try:
+        app.dependency_overrides[get_session_manager] = lambda: MagicMock()
+
+        response = await client.get("/api/v1/auth/check-auth")
+
+        assert response.status_code == 200
+        assert response.json()["authenticated"] is False
     finally:
         app.dependency_overrides = original_deps
