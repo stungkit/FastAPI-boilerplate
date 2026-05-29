@@ -13,6 +13,7 @@ from ..dependencies import (
     GoogleOAuthProviderDep,
     OAuth2FormDep,
     OAuthStateStorageDep,
+    OptionalSessionDataDep,
     SessionManagerDep,
 )
 from ..logging import get_logger
@@ -422,7 +423,7 @@ async def oauth_google_callback(
 
 @router.get("/check-auth")
 async def check_auth(
-    session_data: CurrentSessionDataDep,
+    session_data: OptionalSessionDataDep,
     db: AsyncSessionDep,
 ) -> dict[str, Any]:
     """
